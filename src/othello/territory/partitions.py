@@ -106,4 +106,4 @@ def generate_partitions(
         areas = [territory.area_m2 for territory in territories]
         options.append(PartitionOption(hub_count=hub_count, territories=territories, area_gap_m2=max(areas) - min(areas)))
     options.sort(key=lambda option: option.area_gap_m2)
-    return options[: config.limits.partitions_per_hub_count], "feasible" if options else "proven_infeasible"
+    return options[: config.limits.partitions_per_H], "feasible" if options else "proven_infeasible"

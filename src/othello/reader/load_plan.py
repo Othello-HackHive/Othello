@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import pickle
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +73,24 @@ def _gap_polyline(geometry: Any) -> list[tuple[float, float]]:
         return [(float(coordinates[0][0]), float(coordinates[0][1])), (float(coordinates[1][0]), float(coordinates[1][1]))]
     centroid = geometry.representative_point()
     return [(float(centroid.x), float(centroid.y))] * 2
+
+
+def _connector_rooms(connector_m: Any, rooms: dict[str, Room], wall_depth_m: float, tolerance_m: float) -> list[str]:
+    """Choose the two rooms with the strongest physical contact to a door."""
+
+    contact_margin = max(tolerance_m, wall_depth_m * 0.6)
+    boundary = getattr(connector_m, "boundary", None)
+    if boundary is None:
+        return []
+    scores: list[tuple[float, str]] = []
+    for room in rooms.values():
+        try:
+            score = boundary.intersection(room.polygon_m.buffer(contact_margin)).length
+        except GEOSException:
+            score = 0.0
+        if score > 0:
+            scores.append((score, room.room_id))
+    return [room_id for _, room_id in sorted(scores, reverse=True)[:2]]
 
 
 def _open_passage_gap(room_a: Any, room_b: Any, walls_m: Any, windows_m: Any, wall_depth_m: float) -> Any | None:
@@ -213,31 +232,24 @@ def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig |
                 room_graph[source_room].add(target_room)
                 room_graph[target_room].add(source_room)
 
+    wall_depth_m = float(record.get("wall_depth", 0.0)) / scale
     openings: dict[str, Opening] = {}
     for index, door_units in enumerate(_parts(geometries_units.get("door")), start=1):
         door_m = _scale_geometry(door_units, scale)
-        touching = [room.room_id for room in rooms.values() if door_m.buffer(config.tolerance_m).intersects(room.polygon_m)]
         openings[f"D{index}"] = Opening(
             opening_id=f"D{index}",
             kind="door",
-            rooms=touching,
+            rooms=_connector_rooms(door_m, rooms, wall_depth_m, config.tolerance_m),
             gap_polyline_m=_gap_polyline(door_m),
             counts_for_zone=True,
         )
 
-    # Graph adjacency is not itself a zone link.  It only narrows the set of
-    # room pairs worth checking for a genuine wall-free opening.
-    wall_depth_m = float(record.get("wall_depth", 0.0)) / scale
-    candidate_pairs: set[tuple[str, str]] = set()
-    if graph is not None:
-        for source, target, attributes in graph.edges(data=True):
-            if attributes.get("type") != "adjacency":
-                continue
-            source_room = component_to_room.get(source)
-            target_room = component_to_room.get(target)
-            if source_room in room_graph and target_room in room_graph:
-                candidate_pairs.add(tuple(sorted((source_room, target_room))))
-    for source_room, target_room in sorted(candidate_pairs):
+    # ResPlan's adjacency graph can contain ordinary shared walls.  Scan every
+    # eligible pair geometrically so an unlabelled real opening is retained and
+    # a wall-only adjacency is rejected.
+    for source_room, target_room in combinations(sorted(room_graph), 2):
+        if target_room in room_graph[source_room]:
+            continue
         gap = _open_passage_gap(
             rooms[source_room].polygon_m,
             rooms[target_room].polygon_m,

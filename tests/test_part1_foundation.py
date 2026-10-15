@@ -1,4 +1,6 @@
 import networkx as nx
+import math
+import time
 from shapely.geometry import MultiPolygon, Polygon
 
 from othello.models import SolverConfig
@@ -78,7 +80,24 @@ def test_geometry_verified_open_passage_is_a_zone_link():
     record["wall_depth"] = 2.0
     record["living"] = rectangle(0, 0, 50, 50)
     record["bedroom"] = MultiPolygon([rectangle(50, 0, 100, 50)])
-    record["graph"].add_edge("living_0", "bedroom_0", type="adjacency")
     plan = build_floor_plan_from_resplan(record)
     assert "R02" in plan.room_graph["R01"]
     assert [opening.kind for opening in plan.openings.values()] == ["open_passage"]
+
+
+def test_scale_matches_the_problem_statement_example():
+    record = sample_record()
+    record["inner"] = rectangle(0, 0, 200, 180)
+    record["area"] = 110.0
+    plan = build_floor_plan_from_resplan(record)
+    assert math.isclose(plan.scale, math.sqrt(36_000 / 110), rel_tol=1e-12)
+
+
+def test_expired_partition_deadline_is_unresolved():
+    record = sample_record()
+    record["graph"].add_edge("living_0", "bedroom_0", type="via_door")
+    record["graph"].add_edge("living_0", "kitchen_0", type="via_door")
+    plan = build_floor_plan_from_resplan(record)
+    partitions, status = generate_partitions(plan, 1, deadline=time.monotonic() - 1)
+    assert partitions == []
+    assert status == "unresolved"
