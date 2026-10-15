@@ -5,6 +5,7 @@ from shapely.geometry import MultiPolygon, Polygon
 
 from othello.models import SolverConfig
 from othello.reader import build_floor_plan_from_resplan
+from othello.reader.inspector import render_plan_inspector
 from othello.territory import generate_partitions, hub_lower_bound
 
 
@@ -101,3 +102,10 @@ def test_expired_partition_deadline_is_unresolved():
     partitions, status = generate_partitions(plan, 1, deadline=time.monotonic() - 1)
     assert partitions == []
     assert status == "unresolved"
+
+
+def test_part1_inspector_writes_a_separate_png(tmp_path):
+    output = tmp_path / "plan-audit.png"
+    render_plan_inspector(build_floor_plan_from_resplan(sample_record()), output)
+    assert output.is_file()
+    assert output.stat().st_size > 0

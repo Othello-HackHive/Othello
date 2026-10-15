@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Cable Ring Challenge solver"
 requires-python = ">=3.11"
 dependencies = [
+    "matplotlib>=3.7",
     "networkx>=3.0",
     "pydantic>=2.0",
     "shapely>=2.0",
