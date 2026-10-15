@@ -53,3 +53,32 @@ def test_door_links_form_a_connected_territory():
     assert status == "feasible"
     assert len(partitions) == 1
     assert partitions[0].territories[0].room_ids == ["R01", "R02", "R03"]
+
+
+def test_adjacency_is_not_a_zone_link():
+    record = sample_record()
+    record["graph"].add_edge("living_0", "bedroom_0", type="adjacency")
+    record["graph"].add_edge("living_0", "kitchen_0", type="adjacency")
+    plan = build_floor_plan_from_resplan(record)
+    assert all(not neighbours for neighbours in plan.room_graph.values())
+
+
+def test_development_node_survives_an_empty_hub_zone():
+    record = sample_record()
+    record["living"] = rectangle(0, 0, 4, 4)
+    record["inner"] = rectangle(0, 0, 100, 100)
+    record["wall"] = rectangle(0, 0, 4, 4)
+    plan = build_floor_plan_from_resplan(record)
+    assert len(plan.nodes) == 3
+    assert plan.hub_zones_m["R01"].is_empty
+
+
+def test_geometry_verified_open_passage_is_a_zone_link():
+    record = sample_record()
+    record["wall_depth"] = 2.0
+    record["living"] = rectangle(0, 0, 50, 50)
+    record["bedroom"] = MultiPolygon([rectangle(50, 0, 100, 50)])
+    record["graph"].add_edge("living_0", "bedroom_0", type="adjacency")
+    plan = build_floor_plan_from_resplan(record)
+    assert "R02" in plan.room_graph["R01"]
+    assert [opening.kind for opening in plan.openings.values()] == ["open_passage"]

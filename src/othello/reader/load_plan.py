@@ -9,9 +9,10 @@ from __future__ import annotations
 import math
 import pickle
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from shapely import affinity, make_valid
+from shapely.errors import GEOSException
 from shapely.geometry import GeometryCollection, Point
 from shapely.ops import unary_union
 
@@ -62,14 +63,47 @@ def _safe_point(room_m: Any, walls_m: Any, clearance_m: float) -> Point:
 
 
 def _gap_polyline(geometry: Any) -> list[tuple[float, float]]:
-    boundary = geometry.boundary
-    if hasattr(boundary, "geoms"):
-        boundary = max(boundary.geoms, key=lambda item: item.length)
-    coordinates = list(boundary.coords)
+    boundary = getattr(geometry, "boundary", None)
+    if boundary is not None and hasattr(boundary, "geoms"):
+        parts = [part for part in boundary.geoms if part is not None and not part.is_empty]
+        boundary = max(parts, key=lambda item: item.length) if parts else None
+    coordinates = list(boundary.coords) if boundary is not None and hasattr(boundary, "coords") else []
     if len(coordinates) >= 2:
         return [(float(coordinates[0][0]), float(coordinates[0][1])), (float(coordinates[1][0]), float(coordinates[1][1]))]
     centroid = geometry.representative_point()
     return [(float(centroid.x), float(centroid.y))] * 2
+
+
+def _open_passage_gap(room_a: Any, room_b: Any, walls_m: Any, windows_m: Any, wall_depth_m: float) -> Any | None:
+    """Return a substantive wall-free gap between two room polygons, if one exists.
+
+    ResPlan's ``adjacency`` graph edges also include rooms separated by an
+    ordinary wall, so they are candidates only.  The geometry decides whether
+    a real walkable opening exists.
+    """
+
+    if wall_depth_m <= 0:
+        return None
+    try:
+        gap = room_a.buffer(wall_depth_m * 0.55).intersection(room_b.buffer(wall_depth_m * 0.55))
+        gap = gap.difference(walls_m).difference(windows_m)
+    except GEOSException:
+        # A malformed candidate cannot safely establish a zone link.  It is
+        # intentionally ignored instead of making the complete plan unreadable.
+        return None
+    if gap.is_empty:
+        return None
+    minimum_extent = 2 * wall_depth_m
+    minimum_area = wall_depth_m * wall_depth_m * 0.25
+    pieces = list(gap.geoms) if hasattr(gap, "geoms") else [gap]
+    valid_pieces = []
+    for piece in pieces:
+        if piece.is_empty:
+            continue
+        min_x, min_y, max_x, max_y = piece.bounds
+        if max(max_x - min_x, max_y - min_y) >= minimum_extent and piece.area >= minimum_area:
+            valid_pieces.append(piece)
+    return unary_union(valid_pieces) if valid_pieces else None
 
 
 def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig | None = None) -> FloorPlan:
@@ -130,7 +164,14 @@ def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig |
             continue
         hub_zone = room.polygon_m.difference(walls_m.buffer(config.hub_wall_clearance_m))
         hub_zones_m[room.room_id] = hub_zone
-        point_m = _safe_point(room.polygon_m, walls_m, config.hub_wall_clearance_m)
+        try:
+            point_m = _safe_point(room.polygon_m, walls_m, config.hub_wall_clearance_m)
+        except InputError:
+            # A node is fixed input in the competition.  This fallback exists
+            # only for ResPlan development records that lack node points; an
+            # empty hub zone remains visible to territory generation.
+            point_m = room.polygon_m.representative_point()
+            repairs.append(f"Development node for {room.room_id} is below hub-clearance distance")
         point_units = affinity.scale(point_m, xfact=scale, yfact=scale, origin=(0, 0))
         node_id = f"N{len(nodes) + 1}"
         nodes[node_id] = Node(
@@ -164,6 +205,39 @@ def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig |
             gap_polyline_m=_gap_polyline(door_m),
             counts_for_zone=True,
         )
+
+    # Graph adjacency is not itself a zone link.  It only narrows the set of
+    # room pairs worth checking for a genuine wall-free opening.
+    wall_depth_m = float(record.get("wall_depth", 0.0)) / scale
+    candidate_pairs: set[tuple[str, str]] = set()
+    if graph is not None:
+        for source, target, attributes in graph.edges(data=True):
+            if attributes.get("type") != "adjacency":
+                continue
+            source_room = component_to_room.get(source)
+            target_room = component_to_room.get(target)
+            if source_room in room_graph and target_room in room_graph:
+                candidate_pairs.add(tuple(sorted((source_room, target_room))))
+    for source_room, target_room in sorted(candidate_pairs):
+        gap = _open_passage_gap(
+            rooms[source_room].polygon_m,
+            rooms[target_room].polygon_m,
+            walls_m,
+            windows_m,
+            wall_depth_m,
+        )
+        if gap is None:
+            continue
+        opening_id = f"P{sum(opening.kind == 'open_passage' for opening in openings.values()) + 1}"
+        openings[opening_id] = Opening(
+            opening_id=opening_id,
+            kind="open_passage",
+            rooms=[source_room, target_room],
+            gap_polyline_m=_gap_polyline(gap),
+            counts_for_zone=True,
+        )
+        room_graph[source_room].add(target_room)
+        room_graph[target_room].add(source_room)
 
     excluded_interior_rooms = [
         room.room_id for room in rooms.values() if not room.eligible and room.inside_inner
