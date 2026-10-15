@@ -342,7 +342,6 @@ export default function TwinScene({
       depthWrite: false,
     });
     const wallEdgeMaterial = new THREE.LineBasicMaterial({ color: "#7dd3fc", transparent: true, opacity: 0.85 });
-    const capMaterial = new THREE.LineBasicMaterial({ color: "#bae6fd", transparent: true, opacity: 0.7 });
     const thresholdMaterial = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.45, 2.2, 3.6), toneMapped: false });
     const clearanceMaterial = new THREE.MeshBasicMaterial({ color: "#7dd3fc", transparent: true, opacity: 0.12, side: THREE.DoubleSide, toneMapped: false });
     const wallParts: THREE.Object3D[] = [];
@@ -378,22 +377,8 @@ export default function TwinScene({
       const edgeLines = new THREE.LineSegments(edgeGeo, wallEdgeMaterial);
       edgeLines.position.copy(wall.position);
       edgeLines.userData.baseY = WALL_H / 2;
-      edgeLines.userData.isCap = true;
       architectureGroup.add(edgeLines);
       wallParts.push(edgeLines);
-
-      const cap = new THREE.Line(
-        new THREE.BufferGeometry().setFromPoints([
-          new THREE.Vector3(from[0], WALL_H, from[1]),
-          new THREE.Vector3(to[0], WALL_H, to[1]),
-        ]),
-        capMaterial,
-      );
-      cap.position.copy(frame.toWorld([0, 0], 0));
-      cap.userData.baseY = WALL_H;
-      cap.userData.isCap = true;
-      architectureGroup.add(cap);
-      wallParts.push(cap);
     };
 
     const addThreshold = (a: Vec2, b: Vec2) => {
