@@ -106,6 +106,25 @@ def _open_passage_gap(room_a: Any, room_b: Any, walls_m: Any, windows_m: Any, wa
     return unary_union(valid_pieces) if valid_pieces else None
 
 
+def _free_space(inner_m: Any, walls_m: Any, windows_m: Any, repairs: list[str]) -> Any:
+    """Subtract obstacles while tolerating rare GEOS overlay failures."""
+
+    try:
+        return inner_m.difference(unary_union([walls_m, windows_m]))
+    except GEOSException:
+        try:
+            free_space = inner_m.difference(walls_m).difference(windows_m)
+            repairs.append("Constructed free space with sequential obstacle subtraction after union failure")
+            return free_space
+        except GEOSException:
+            try:
+                free_space = make_valid(inner_m).difference(make_valid(walls_m)).difference(make_valid(windows_m))
+            except GEOSException as error:
+                raise InputError("Unable to construct free space from repaired geometry") from error
+            repairs.append("Repaired obstacle layers before sequential free-space subtraction")
+            return free_space
+
+
 def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig | None = None) -> FloorPlan:
     """Normalise one raw ResPlan record.
 
@@ -134,7 +153,7 @@ def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig |
     inner_m = _scale_geometry(inner_units, scale)
     walls_m = _scale_geometry(geometries_units.get("wall", GeometryCollection()), scale)
     windows_m = _scale_geometry(geometries_units.get("window", GeometryCollection()), scale)
-    free_space_m = inner_m.difference(unary_union([walls_m, windows_m]))
+    free_space_m = _free_space(inner_m, walls_m, windows_m, repairs)
 
     rooms: dict[str, Room] = {}
     component_to_room: dict[str, str] = {}
