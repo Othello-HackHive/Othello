@@ -22,6 +22,7 @@ class SolverConfig(BaseModel):
 
     max_nodes_per_hub: int = 5
     max_area_per_hub_m2: float = 100.0
+    min_benchmark_room_area_m2: float = 2.0
     hub_wall_clearance_m: float = 0.5
     tolerance_m: float = 0.001
     cable_transit_policy: str = "avoid_if_possible"

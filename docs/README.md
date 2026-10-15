@@ -10,6 +10,7 @@ Team Othello's v1 specification. The official 8-slide PPT is the final authority
 | [APP_FLOW.md](APP_FLOW.md) | Step-by-step run, time budget, failure and timeout paths |
 | [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) | Three backend parts, tasks, milestones, test gates, git workflow |
 | [ASSUMPTIONS.md](ASSUMPTIONS.md) | Confirmed / Assumed / Pending register and the organiser question list |
+| [PART1_HANDOFF.md](PART1_HANDOFF.md) | Part 1 reader, territory and validation handoff notes |
 
 Status labels: **[CONFIRMED]** (in the PPT), **[ASSUMED]** (our switchable default), **[PENDING]** (needs the organiser JSON, checker or an answer).
 

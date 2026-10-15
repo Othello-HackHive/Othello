@@ -5,6 +5,7 @@ from shapely.geometry import MultiPolygon, Polygon
 
 from othello.models import SolverConfig
 from othello.reader import build_floor_plan_from_resplan
+from othello.reader.benchmark import benchmark_issues
 from othello.reader.inspector import render_plan_inspector
 from othello.territory import generate_partitions, hub_lower_bound
 
@@ -109,3 +110,13 @@ def test_part1_inspector_writes_a_separate_png(tmp_path):
     render_plan_inspector(build_floor_plan_from_resplan(sample_record()), output)
     assert output.is_file()
     assert output.stat().st_size > 0
+
+
+def test_benchmark_filter_diagnostics_do_not_silently_drop_rooms():
+    record = sample_record()
+    record["living"] = rectangle(0, 0, 150, 100)
+    record["bedroom"] = MultiPolygon([rectangle(60, 0, 61, 1)])
+    plan = build_floor_plan_from_resplan(record)
+    issues = benchmark_issues(plan)
+    assert any("R01 exceeds" in issue for issue in issues)
+    assert any("R02 is below" in issue for issue in issues)

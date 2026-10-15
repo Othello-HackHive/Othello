@@ -20,6 +20,7 @@ from matplotlib.patches import Patch, Polygon as PolygonPatch
 from othello.models import FloorPlan
 
 from .load_plan import build_floor_plan_from_resplan, load_resplan_dataset
+from .benchmark import benchmark_issues
 
 ROOM_COLOURS = {
     "living": "#d9d9d9",
@@ -115,6 +116,7 @@ def render_plan_inspector(plan: FloorPlan, output_path: str | Path) -> Path:
     if empty_zones:
         warnings.append("Empty hub zones: " + ", ".join(empty_zones))
     warnings.extend(repair for repair in plan.repairs if repair.startswith("Repaired") or repair.startswith("Development node"))
+    warnings.extend(benchmark_issues(plan))
     if warnings:
         axis.text(0.01, 0.01, "\n".join(warnings), transform=axis.transAxes, ha="left", va="bottom", fontsize=7, color="#b30000", bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "#b30000"})
 
