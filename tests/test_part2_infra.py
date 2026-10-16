@@ -317,6 +317,9 @@ def test_the_deploy_workflow_uses_a_temporary_identity_and_waits_for_green_check
     assert (
         "vars.AWS_DEPLOY_ROLE_ARN" in job["if"]
         and "conclusion == 'success'" in job["if"]
+        # automatic deploys are opt-in: the automatic branch of the condition needs AUTO_DEPLOY
+        and "vars.AUTO_DEPLOY == 'true' && github.event.workflow_run.conclusion"
+        in job["if"]
     )
     steps = {step.get("name", ""): step for step in job["steps"]}
     sign_in = next(
@@ -421,6 +424,7 @@ def test_the_guide_names_every_template_parameter_and_every_github_setting_the_w
         "ALLOWED_ORIGINS",
         "OTHELLO_API_KEY",
         "WORKER_CONCURRENCY",
+        "AUTO_DEPLOY",
     } <= used
     assert [name for name in used if f"`{name}`" not in text] == []
 
@@ -488,3 +492,25 @@ def test_the_deploy_step_never_hands_the_sam_tool_an_empty_setting():
         "overrides=("
     )  # only inside the "if"
     assert '--parameter-overrides "${overrides[@]}"' in script
+
+
+def test_the_deploy_role_may_look_at_the_helper_stack_sam_creates_for_the_image_repositories():
+    """Found by the first deploy: AccessDenied on stack/othello-cable-ring-<hash>-CompanionStack."""
+    role = load("github-deploy-role.yaml")
+    statements = role["Resources"]["DeployRole"]["Properties"]["Policies"][0][
+        "PolicyDocument"
+    ]["Statement"]
+    stacks = next(s for s in statements if s["Sid"] == "Stacks")["Resource"]
+    patterns = [r["Fn::Sub"] for r in stacks]
+    assert any(p.endswith(":stack/${StackName}-*/*") for p in patterns)
+    assert not any(
+        p.endswith((":stack/*", ":stack/*/*")) for p in patterns
+    )  # still only our own stacks
+
+
+def test_the_guide_puts_the_deploy_from_your_own_computer_first_and_explains_the_optional_switch():
+    text = (ROOT / "docs" / "DEPLOYMENT.md").read_text(encoding="utf-8")
+    assert text.index("sam build --template-file infra/template.yaml") < text.index(
+        "One-time setup for Way 2"
+    )
+    assert "`AUTO_DEPLOY`" in text and "AllowedOrigins=" in text
