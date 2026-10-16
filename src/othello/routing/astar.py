@@ -7,6 +7,7 @@ from math import fsum, isfinite
 from numbers import Real
 import time
 from types import MappingProxyType
+from typing import Any
 
 import networkx as nx
 
