@@ -10,9 +10,15 @@ as the official answer.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
+
+from pydantic import ValidationError
+
 from othello.checker.geometry import distance_to
 from othello.checker.metrics import compute_metrics
 from othello.checker.rules import RULES, hub_area_m2, run_rules
+from othello.io.errors import OthelloError
 from othello.models.config import SolverConfig
 from othello.models.design import Design
 from othello.models.plan import FloorPlan
@@ -32,16 +38,65 @@ RULE_DETAILS = {
 }
 
 
-def score_design(plan: FloorPlan, design: Design, cfg: SolverConfig | None = None) -> Metrics:
+class DesignFormatError(OthelloError, ValueError):
+    """What the solver handed over is not a design (or not in the Design shape)."""
+
+    code = "DESIGN_INVALID"
+    stage = "check"
+    hint = "the solver must return a Design: see BACKEND_SCHEMA section 6"
+
+
+def coerce_design(value: Design | Mapping[str, Any]) -> Design:
+    """A ``Design``, or a dictionary with the same fields (what the solver hands over).
+
+    Raises ``DesignFormatError`` (a ``ValueError``) with a short reason when it is neither.
+    """
+    if isinstance(value, Design):
+        return value
+    if not isinstance(value, Mapping):
+        raise DesignFormatError(f"a design must be a Design or a dictionary, not {type(value).__name__}")
+    try:
+        return Design.model_validate(value)
+    except ValidationError as problem:
+        first = problem.errors()[0]
+        where = ".".join(str(part) for part in first["loc"])
+        raise DesignFormatError(f"design is not in the Design shape ({where}: {first['msg']})") from problem
+
+
+def score_design(plan: FloorPlan, design: Design | Mapping[str, Any], cfg: SolverConfig | None = None) -> Metrics:
     """L, X, O, B, J and the area gap, recomputed from the cable lines only."""
     config = cfg or SolverConfig()
-    areas = {hub.hub_id: hub_area_m2(plan, hub) for hub in design.hubs}
-    return compute_metrics(design, config, areas)
+    parsed = coerce_design(design)
+    areas = {hub.hub_id: hub_area_m2(plan, hub) for hub in parsed.hubs}
+    return compute_metrics(parsed, config, areas)
 
 
-def check_design(plan: FloorPlan, design: Design, cfg: SolverConfig | None = None) -> ValidationResult:
-    """Run every rule, collect the broken ones and the scores."""
+def check_design(
+    plan: FloorPlan, design: Design | Mapping[str, Any], cfg: SolverConfig | None = None
+) -> ValidationResult:
+    """Run every rule, collect the broken ones and the scores.
+
+    A dictionary is accepted and converted.  Something that cannot be read as a
+    design gives an invalid result (OUTPUT_SCHEMA), never an exception.
+    """
     config = cfg or SolverConfig()
+    try:
+        design = coerce_design(design)
+    except DesignFormatError as problem:
+        return ValidationResult(
+            valid=False,
+            violations=[Violation(type="OUTPUT_SCHEMA", detail=str(problem))],
+            metrics=None,
+            checks=[
+                RuleCheck(
+                    rule_id="schema",
+                    label="OUTPUT FORMAT",
+                    passed=False,
+                    value="1 PROBLEMS",
+                    detail=RULE_DETAILS["schema"],
+                )
+            ],
+        )
     by_rule = run_rules(plan, design, config)
     violations = [v for found in by_rule.values() for v in found]
     return ValidationResult(
@@ -120,7 +175,8 @@ def _zones_value(plan, design, cfg, found):
 def _hub_points_value(plan, design, cfg, found):
     if not design.hubs:
         return "NO HUBS"
-    nearest = min(distance_to(h.location, plan.walls_m) for h in design.hubs)
+    obstacles = plan.walls_m.union(plan.windows_m)
+    nearest = min(distance_to(h.location, obstacles) for h in design.hubs)
     return f"{nearest:.2f} M FROM WALLS"
 
 

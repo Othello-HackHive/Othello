@@ -1,8 +1,10 @@
 """T07: every rule passes on good plans and fails on the right broken plans."""
 
+import mutations as mut
 import pytest
 from fixtures import designs
 from fixtures.plans import slide5_plan, tiny_plan
+from shapely.geometry import Point
 
 from othello.checker.rules import (
     RULES,
@@ -238,6 +240,24 @@ def test_hub_in_the_bathroom_is_caught(plan):
     design.hubs[1].location = (13.0, 7.0)
     found = check_hub_points(plan, design, CFG)
     assert codes(found) == {"HUB_NOT_IN_ROOM"}
+
+
+def test_a_hub_may_not_stand_in_a_window_opening(plan):
+    # Bedroom 1 has a window in its top wall (x = 1..3).  At (2.0, 8.6) the nearest WALL is more
+    # than 1 m away, but the window is only 0.34 m away, and a window counts as a wall here.
+    spot = (2.0, 8.6)
+    assert Point(spot).distance(plan.walls_m) > 0.5
+    assert Point(spot).distance(plan.windows_m) < 0.5
+    design = mut.put_hub_in_room(mut.move_hub(designs.slide5_design(), "H1", spot), "H1", "R01")
+    found = check_hub_points(plan, design, CFG)
+    assert codes(found) == {"HUB_WALL_CLEARANCE"}
+
+
+def test_the_hub_zone_of_the_practice_house_keeps_away_from_windows(plan):
+    zone = plan.hub_zones_m["R01"]
+    assert not zone.intersects(Point(2.0, 8.6))
+    # the 0.5 m edge is drawn as a many-sided shape, so it can be up to ~0.6 mm closer: within 1 mm
+    assert zone.distance(plan.windows_m) >= 0.5 - CFG.tolerance_m
 
 
 def test_clearance_distance_comes_from_the_config(plan):

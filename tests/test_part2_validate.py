@@ -4,7 +4,7 @@ import pytest
 from fixtures import designs
 from fixtures.plans import SLIDE5_HUB_AREAS, slide5_plan, tiny_plan
 
-from othello.checker import check_design, is_valid, score_design
+from othello.checker import check_design, coerce_design, is_valid, score_design
 from othello.checker.metrics import is_better
 from othello.checker.rules import RULES
 from othello.models.config import SolverConfig
@@ -153,6 +153,44 @@ def test_a_design_with_no_hubs_is_invalid_and_does_not_crash(plan):
     assert not line(result, "coverage").passed
     assert result.metrics.hub_count == 0 and result.metrics.J == 0.0
     assert line(result, "hub_points").value == "NO HUBS"
+
+
+def test_a_plain_dictionary_in_the_design_shape_is_accepted_like_a_design(plan):
+    design = designs.slide5_design()
+    as_dict = design.model_dump()  # what the solver hands over: nested dictionaries and lists
+    assert check_design(plan, as_dict) == check_design(plan, design)
+    assert score_design(plan, as_dict) == score_design(plan, design)
+    assert check_design(plan, as_dict).valid
+
+
+def test_a_broken_dictionary_is_judged_invalid_with_a_clear_reason_not_a_crash(plan):
+    as_dict = designs.broken_cable_through_wall().model_dump()
+    result = check_design(plan, as_dict)
+    assert not result.valid and "WALL_INTERSECTION" in {v.type for v in result.violations}
+
+
+@pytest.mark.parametrize(
+    "garbage",
+    [None, 5, "design", [], {}, {"plan_id": "x"}, {"plan_id": "x", "hubs": "none"}, {"plan_id": "x", "hubs": [{"hub_id": "H1"}]}],
+)
+def test_something_that_is_not_a_design_is_invalid_not_an_exception(plan, garbage):
+    result = check_design(plan, garbage)
+    assert not result.valid and result.metrics is None
+    assert [v.type for v in result.violations] == ["OUTPUT_SCHEMA"]
+    assert [c.rule_id for c in result.checks] == ["schema"] and not result.checks[0].passed
+
+
+def test_scoring_garbage_raises_a_plain_value_error(plan):
+    with pytest.raises(ValueError, match="Design"):
+        score_design(plan, "design")
+    with pytest.raises(ValueError, match="Design shape"):
+        score_design(plan, {"plan_id": "x"})
+
+
+def test_coerce_design_returns_a_design_unchanged_and_converts_a_dictionary():
+    design = designs.slide5_design()
+    assert coerce_design(design) is design
+    assert coerce_design(design.model_dump()) == design
 
 
 def test_result_can_be_saved_and_loaded_again(plan):

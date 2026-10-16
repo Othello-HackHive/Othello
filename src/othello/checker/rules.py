@@ -176,6 +176,8 @@ def check_hub_points(plan: FloorPlan, design: Design, cfg: SolverConfig) -> list
     """Hub inside one of its own eligible rooms and at least 0.5 m from walls."""
     found: list[Violation] = []
     tol = cfg.tolerance_m
+    # Windows count as walls here (assumption A5): a hub may not stand in a window opening.
+    obstacles = plan.walls_m.union(plan.windows_m)
     for hub in design.hubs:
         room = plan.rooms.get(hub.room_id)
         where = (float(hub.location[0]), float(hub.location[1]))
@@ -186,7 +188,7 @@ def check_hub_points(plan: FloorPlan, design: Design, cfg: SolverConfig) -> list
             found.append(_violation("HUB_NOT_IN_ROOM", hub.hub_id, point=where, detail="hub room is not one of its rooms"))
         if not point_in_polygon(where, room.polygon_m, tol):
             found.append(_violation("HUB_NOT_IN_ROOM", hub.hub_id, point=where, detail=f"hub is outside {hub.room_id}"))
-        if not has_clearance(where, plan.walls_m, cfg.hub_wall_clearance_m, tol):
+        if not has_clearance(where, obstacles, cfg.hub_wall_clearance_m, tol):
             found.append(
                 _violation(
                     "HUB_WALL_CLEARANCE",

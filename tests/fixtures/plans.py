@@ -95,9 +95,10 @@ def _build_plan(
             room_graph[a].append(b)
             room_graph[b].append(a)
 
-    hub_zones = {
-        rid: polygons[rid].difference(walls_m.buffer(HUB_CLEARANCE)) for rid in eligible_ids
-    }
+    # Hub zone = room minus 0.5 m around the walls AND the windows (a window is a wall
+    # for clearance), so the zone never leaks into a window opening.
+    keep_away = unary_union([walls_m, windows_m]).buffer(HUB_CLEARANCE)
+    hub_zones = {rid: polygons[rid].difference(keep_away) for rid in eligible_ids}
 
     return FloorPlan(
         plan_id=plan_id,
