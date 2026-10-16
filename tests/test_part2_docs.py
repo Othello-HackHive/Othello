@@ -96,3 +96,74 @@ def test_every_relative_link_in_the_docs_points_at_a_file_that_exists():
             if target.startswith(("http", "mailto")):
                 continue
             assert (DOCS / target).resolve().exists(), (name, target)
+
+
+# ------------------------------------------------------------- the web API doc
+
+
+def api_doc():
+    return doc("API.md")
+
+
+def test_every_api_route_is_described():
+    text = api_doc()
+    for route in (
+        "GET /health",
+        "POST /api/jobs",
+        "GET /api/jobs/{id}",
+        "GET /api/jobs/{id}/events",
+        "GET /api/jobs/{id}/result/{kind}",
+        "POST /api/jobs/{id}/cancel",
+        "DELETE /api/jobs/{id}",
+    ):
+        assert route in text, route
+
+
+def test_the_api_doc_lists_the_real_progress_stages_statuses_and_result_kinds():
+    from othello.run import PROGRESS_STAGES
+    from othello.service.store import PUBLIC_KINDS, JobStatus
+
+    text = api_doc()
+    assert [s for s in PROGRESS_STAGES if f"`{s}`" not in text] == []
+    assert [
+        s for s in JobStatus.__args__ if f"`{s}`" not in text and s != "queued"
+    ] == []
+    assert (
+        "`queued`" in text and [k for k in PUBLIC_KINDS if f"`{k}`" not in text] == []
+    )
+
+
+def test_the_api_doc_lists_the_real_settings_limits_and_environment_variables():
+    from othello.service.config import ALLOWED_SETTINGS, ServiceConfig
+    from othello.service.plan_json import SHAPE_KEYS
+
+    text = api_doc()
+    assert [s for s in ALLOWED_SETTINGS if f"`{s}`" not in text] == []
+    assert [k for k in SHAPE_KEYS if f"`{k}`" not in text] == []
+    limits = ServiceConfig()
+    assert (
+        f"from 1 to {limits.max_budget_s:g}" in text
+        and f"default {limits.default_budget_s:g}" in text
+    )
+    for name in (
+        "DEFAULT_BUDGET_S",
+        "MAX_BUDGET_S",
+        "MAX_UPLOAD_BYTES",
+        "MAX_ACTIVE_JOBS",
+        "RETENTION_S",
+        "ORIGINS",
+        "KEY",
+    ):
+        assert f"OTHELLO_API_{name}" in text, name
+
+
+def test_every_error_code_the_api_can_send_is_in_the_doc():
+    import re as regex
+
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "othello" / "service" / "api.py"
+    ).read_text(encoding="utf-8")
+    codes = set(regex.findall(r'ApiError\(\s*\d+,\s*"([A-Z_]+)"', source)) | {
+        "INTERNAL_ERROR"
+    }
+    assert len(codes) >= 10 and [c for c in codes if f"`{c}`" not in api_doc()] == []

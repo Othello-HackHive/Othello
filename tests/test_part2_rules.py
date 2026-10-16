@@ -19,6 +19,7 @@ from othello.checker.rules import (
     check_schema,
     check_zones,
     room_changes,
+    rooms_walked,
     run_rules,
 )
 from othello.models.config import SolverConfig
@@ -41,7 +42,11 @@ def codes(violations):
     return {v.type for v in violations}
 
 
-GOOD = [designs.slide5_design, designs.slide5_with_crossing, designs.slide5_with_overlap]
+GOOD = [
+    designs.slide5_design,
+    designs.slide5_with_crossing,
+    designs.slide5_with_overlap,
+]
 
 # the main rule each broken plan is built to break
 EXPECTED = {
@@ -115,7 +120,11 @@ def test_schema_catches_wrong_plan_id_unknown_ids_and_duplicate_hubs(plan):
     found = check_schema(plan, design, CFG)
     assert codes(found) == {"OUTPUT_SCHEMA"}
     details = " ".join(v.detail for v in found)
-    assert "SOMETHING_ELSE" in details and "R99" in details and "H1 used 2 times" in details
+    assert (
+        "SOMETHING_ELSE" in details
+        and "R99" in details
+        and "H1 used 2 times" in details
+    )
 
 
 def test_schema_catches_an_excluded_room_assigned_to_a_hub(plan):
@@ -140,7 +149,10 @@ def test_coverage_passes_when_each_room_and_node_has_one_owner(plan):
 def test_coverage_names_the_missing_room_and_node(plan):
     found = check_coverage(plan, designs.broken_coverage_missing(), CFG)
     assert codes(found) == {"COVERAGE_MISSING"}
-    assert [v.detail for v in found] == ["room R06 belongs to no hub", "node N6 belongs to no hub"]
+    assert [v.detail for v in found] == [
+        "room R06 belongs to no hub",
+        "node N6 belongs to no hub",
+    ]
 
 
 def test_coverage_names_the_duplicated_room_and_node(plan):
@@ -172,7 +184,9 @@ def test_exactly_five_nodes_is_allowed(plan):
 def test_capacity_limits_come_from_the_config(plan):
     design = designs.slide5_design()  # H1: 3 nodes, 71 m2
     assert check_capacity(plan, design, SolverConfig(max_nodes_per_hub=2)) != []
-    assert codes(check_capacity(plan, design, SolverConfig(max_area_per_hub_m2=70.0))) == {"CAPACITY_AREA"}
+    assert codes(
+        check_capacity(plan, design, SolverConfig(max_area_per_hub_m2=70.0))
+    ) == {"CAPACITY_AREA"}
     assert check_capacity(plan, design, SolverConfig(max_area_per_hub_m2=71.0)) == []
 
 
@@ -209,7 +223,9 @@ def test_hub_points_pass_on_good_plan(plan):
 
 
 def test_hub_in_a_wall_and_hub_too_close_are_both_clearance_problems(plan):
-    assert codes(check_hub_points(plan, designs.broken_hub_in_wall(), CFG)) == {"HUB_WALL_CLEARANCE"}
+    assert codes(check_hub_points(plan, designs.broken_hub_in_wall(), CFG)) == {
+        "HUB_WALL_CLEARANCE"
+    }
     close = check_hub_points(plan, designs.broken_hub_too_close_to_wall(), CFG)
     assert codes(close) == {"HUB_WALL_CLEARANCE"}
     assert close[0].point == pytest.approx((3.3, 3.5))
@@ -223,7 +239,9 @@ def test_hub_exactly_half_a_metre_from_the_wall_passes(plan):
 
 def test_hub_outside_its_room_is_caught(plan):
     design = designs.slide5_design()
-    design.hubs[0].room_id = "R01"  # location (5, 3.5) is in the living room, not bedroom 1
+    design.hubs[
+        0
+    ].room_id = "R01"  # location (5, 3.5) is in the living room, not bedroom 1
     assert "HUB_NOT_IN_ROOM" in codes(check_hub_points(plan, design, CFG))
 
 
@@ -248,7 +266,9 @@ def test_a_hub_may_not_stand_in_a_window_opening(plan):
     spot = (2.0, 8.6)
     assert Point(spot).distance(plan.walls_m) > 0.5
     assert Point(spot).distance(plan.windows_m) < 0.5
-    design = mut.put_hub_in_room(mut.move_hub(designs.slide5_design(), "H1", spot), "H1", "R01")
+    design = mut.put_hub_in_room(
+        mut.move_hub(designs.slide5_design(), "H1", spot), "H1", "R01"
+    )
     found = check_hub_points(plan, design, CFG)
     assert codes(found) == {"HUB_WALL_CLEARANCE"}
 
@@ -279,7 +299,9 @@ def test_ring_that_skips_a_node_is_caught(plan):
 
 
 def test_ring_that_ends_at_another_hub_is_caught(plan):
-    assert codes(check_rings(plan, designs.broken_ring_ends_at_other_hub(), CFG)) == {"RING_WRONG_HUB"}
+    assert codes(check_rings(plan, designs.broken_ring_ends_at_other_hub(), CFG)) == {
+        "RING_WRONG_HUB"
+    }
 
 
 def test_ring_that_ends_somewhere_else_is_not_closed(plan):
@@ -308,7 +330,10 @@ def test_ring_using_a_hub_as_a_stop_is_caught(plan):
 
 def test_cable_that_jumps_between_legs_is_a_broken_chain(plan):
     design = designs.slide5_design()
-    design.hubs[0].ring.legs[1].polyline[0] = (7.0, 2.6)  # does not start where the last leg ended
+    design.hubs[0].ring.legs[1].polyline[0] = (
+        7.0,
+        2.6,
+    )  # does not start where the last leg ended
     found = check_rings(plan, design, CFG)
     assert "RING_BRANCH" in codes(found)
 
@@ -356,14 +381,24 @@ def test_free_space_passes_on_good_plan(plan):
 def test_free_space_reports_leg_number_and_spot(plan):
     found = check_free_space(plan, designs.broken_cable_through_wall(), CFG)
     assert codes(found) == {"WALL_INTERSECTION"}
-    assert found[0].hub_id == "H1" and found[0].ring_id == "H1" and found[0].segment_index == 2
+    assert (
+        found[0].hub_id == "H1"
+        and found[0].ring_id == "H1"
+        and found[0].segment_index == 2
+    )
     assert found[0].point is not None
 
 
 def test_each_free_space_problem_has_its_own_code(plan):
-    assert codes(check_free_space(plan, designs.broken_diagonal_segment(), CFG)) == {"SEGMENT_NOT_AXIS_ALIGNED"}
-    assert "WINDOW_INTERSECTION" in codes(check_free_space(plan, designs.broken_cable_through_window(), CFG))
-    assert "OUTSIDE_INNER" in codes(check_free_space(plan, designs.broken_cable_outside_inner(), CFG))
+    assert codes(check_free_space(plan, designs.broken_diagonal_segment(), CFG)) == {
+        "SEGMENT_NOT_AXIS_ALIGNED"
+    }
+    assert "WINDOW_INTERSECTION" in codes(
+        check_free_space(plan, designs.broken_cable_through_window(), CFG)
+    )
+    assert "OUTSIDE_INNER" in codes(
+        check_free_space(plan, designs.broken_cable_outside_inner(), CFG)
+    )
 
 
 # ---------------------------------------------------------------- doors
@@ -413,3 +448,50 @@ def test_crossing_between_rooms_away_from_every_door_is_caught(plan):
 def test_cable_leaving_the_house_is_not_a_room_change(plan):
     found = check_doors(plan, designs.broken_cable_through_window(), CFG)
     assert found == []  # it is caught by the window and outside rules instead
+
+
+# ------------------------------------- rooms outside the house never count (real-data bug)
+
+
+def with_exterior_room_over(plan, room_id, kind="land"):
+    """A copy of the plan with an outside region (land, garden...) lying over a real room.
+
+    Real ResPlan data has such overlaps; the exterior region is listed first so it would win
+    any "which room is this point in?" lookup that did not skip it.
+    """
+    source = plan.rooms[room_id]
+    outside = source.model_copy(
+        update={
+            "room_id": "R99",
+            "kind": kind,
+            "eligible": False,
+            "inside_inner": False,
+        }
+    )
+    return plan.model_copy(update={"rooms": {"R99": outside, **plan.rooms}})
+
+
+@pytest.mark.parametrize("room_id", ["R01", "R05"])
+def test_an_outside_region_lying_over_a_room_does_not_break_the_door_rule(
+    plan, room_id
+):
+    noisy = with_exterior_room_over(plan, room_id)
+    assert check_doors(noisy, designs.slide5_design(), CFG) == []
+    assert all(
+        label != "R99" for label, _, _ in rooms_walked(noisy, [(1.0, 1.0), (4.0, 1.0)])
+    )
+
+
+def test_the_whole_design_is_still_valid_with_an_outside_region_over_a_room(plan):
+    from othello.checker import check_design
+
+    assert check_design(
+        with_exterior_room_over(plan, "R05"), designs.slide5_design(), CFG
+    ).valid
+
+
+def test_a_real_wall_crossing_is_still_caught_with_an_outside_region_present(plan):
+    noisy = with_exterior_room_over(plan, "R01")
+    assert "ROOM_TRANSITION_NOT_VIA_OPENING" in codes(
+        check_doors(noisy, designs.broken_cable_through_wall(), CFG)
+    )
