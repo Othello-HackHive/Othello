@@ -48,6 +48,7 @@ jobs:
           src/othello/checker
           src/othello/io
           src/othello/run.py
+          src/othello/harness.py
           src/othello/models/design.py
           src/othello/models/result.py
           tests/fixtures
