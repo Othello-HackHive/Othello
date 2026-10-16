@@ -432,6 +432,22 @@ button {
   pointer-events: auto;
 }
 
+.cloud-message {
+  max-width: 500px;
+  margin: 12px 0 0;
+  padding: 9px 12px;
+  color: #9ad9e4;
+  border-left: 2px solid #71c7d9;
+  background: rgba(13, 41, 51, 0.75);
+  font: 500 10px/1.5 "JetBrains Mono", monospace;
+}
+
+.cloud-message.cloud-error {
+  color: #ffb0a8;
+  border-left-color: #ee3124;
+  background: rgba(54, 18, 18, 0.75);
+}
+
 .primary-action,
 .export-action {
   position: relative;
