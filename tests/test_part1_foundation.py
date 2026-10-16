@@ -84,6 +84,19 @@ def test_hub_zone_and_development_node_exclude_window_clearance():
     assert plan.free_space_m.covers(plan.hub_zones_m["R01"])
 
 
+def test_every_hub_zone_point_has_required_wall_and_window_clearance():
+    record = sample_record()
+    record["wall"] = rectangle(0, 0, 4, 4)
+    record["window"] = rectangle(20, 20, 30, 30)
+    config = SolverConfig()
+    plan = build_floor_plan_from_resplan(record, config)
+    for zone in plan.hub_zones_m.values():
+        if zone.is_empty:
+            continue
+        assert zone.distance(plan.walls_m) >= config.hub_wall_clearance_m
+        assert zone.distance(plan.windows_m) >= config.hub_wall_clearance_m
+
+
 def test_hub_zone_is_clipped_to_the_inner_free_space():
     record = sample_record()
     record["living"] = rectangle(-10, 0, 50, 50)
