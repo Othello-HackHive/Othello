@@ -11,9 +11,9 @@ from typing import Any, Callable
 from othello.routing import DistanceTable, RoutingCache
 
 from .f0 import construct_f0_design
-from .hub_candidates import generate_hub_candidates
+from .hub_candidates import HubCandidateLimitError, generate_hub_candidates
 from .node_orders import enumerate_visiting_orders
-from .route_selection import _optional_checker, _score_of_verified, select_whole_design_routes
+from .route_selection import _invoke_checker, _optional_checker, select_whole_design_routes
 from .types import HubCountSummary, OuterSearchResult
 
 
@@ -22,6 +22,10 @@ class _Deadline(Exception):
 
 
 class _Unsupported(Exception):
+    pass
+
+
+class _CandidateConfiguration(Exception):
     pass
 
 
@@ -63,7 +67,11 @@ def _batch(value: Any, count: int) -> tuple[tuple[Any, ...], str]:
 
 def _ring_variants(plan: Any, territory: Any, hub_id: str, config: Any,
                    cache: RoutingCache, deadline: float | None, cap: int) -> list[tuple[float, dict]]:
-    candidates = generate_hub_candidates(plan, territory, config, deadline)
+    try:
+        candidates = generate_hub_candidates(plan, territory, config, deadline)
+    except HubCandidateLimitError as exc:
+        _check(deadline)
+        raise _CandidateConfiguration(str(exc)) from exc
     if candidates.status == "timeout":
         raise _Deadline
     if candidates.status == "unsupported_geometry":
@@ -223,6 +231,7 @@ def optimize_partitions(
     partitions_seen = 0
     configs_seen = 0
     timed_out = False
+    candidate_configuration_error = False
 
     def accept(design: dict[str, Any], score: float, hub_count: int, gap: float) -> None:
         nonlocal incumbent, best_key
@@ -259,13 +268,15 @@ def optimize_partitions(
                     raise _Deadline
                 if baseline.status != "constructed_unverified" or baseline.design is None:
                     diagnostics.append(f"H={count}: F0 {baseline.status}: {'; '.join(baseline.diagnostics)}")
+                    candidate_configuration_error |= baseline.status == "candidate_configuration_error"
                     continue
                 if provisional is None:
                     provisional = deepcopy(baseline.design)
                 gap = float(option.area_gap_m2)
                 if checker is not None:
-                    validation = checker(plan, baseline.design, config)
-                    score = _score_of_verified(validation)
+                    _, score, failure = _invoke_checker(checker, plan, baseline.design, config)
+                    if failure is not None:
+                        diagnostics.append(f"H={count}: F0 {failure}")
                     if score is not None:
                         accept(baseline.design, score, count, gap)
                 _check(effective_deadline)
@@ -280,6 +291,9 @@ def optimize_partitions(
                     raise _Deadline
                 if selected.status not in {"verified", "unverified", "no_verified_design"}:
                     diagnostics.append(f"H={count}: route selection {selected.status}: {'; '.join(selected.diagnostics)}")
+                elif any("checker" in detail.lower() for detail in selected.diagnostics):
+                    diagnostics.extend(f"H={count}: route selection: {detail}" for detail in selected.diagnostics
+                                       if "checker" in detail.lower())
                 # With no checker, further configurations cannot yield an
                 # authoritative incumbent; retain one provisional design.
                 if checker is None:
@@ -291,8 +305,9 @@ def optimize_partitions(
                     if _design_key(alternative) == baseline_signature:
                         continue
                     configs_seen += 1
-                    validation = checker(plan, alternative, config)
-                    score = _score_of_verified(validation)
+                    _, score, failure = _invoke_checker(checker, plan, alternative, config)
+                    if failure is not None:
+                        diagnostics.append(f"H={count}: alternative {failure}")
                     if score is not None:
                         accept(alternative, score, count, gap)
                     _check(effective_deadline)
@@ -302,8 +317,14 @@ def optimize_partitions(
                         accept(selected.design, selected.J, count, gap)
                     if selected.status == "timeout":
                         raise _Deadline
+                    if selected.diagnostics:
+                        diagnostics.extend(f"H={count}: route selection: {detail}" for detail in selected.diagnostics
+                                           if "checker" in detail.lower())
             except _Unsupported as exc:
                 diagnostics.append(f"H={count}: unsupported_geometry: {exc}")
+            except _CandidateConfiguration as exc:
+                candidate_configuration_error = True
+                diagnostics.append(f"H={count}: candidate_configuration_error: {exc}")
             except _Deadline:
                 timed_out = True
                 diagnostics.append(f"H={count}: deadline expired; no infeasibility proof")
@@ -321,6 +342,9 @@ def optimize_partitions(
                 elif improved.status == "unsupported_geometry":
                     diagnostics.append(f"H={count}: improvement unsupported_geometry: "
                                        f"{'; '.join(improved.diagnostics)}")
+                elif improved.diagnostics:
+                    diagnostics.extend(f"H={count}: improvement: {detail}" for detail in improved.diagnostics
+                                       if "checker" in detail.lower() or "candidate" in detail.lower())
             except _Deadline:
                 timed_out = True
             if timed_out:
@@ -337,7 +361,8 @@ def optimize_partitions(
         proven = False
     summary = HubCountSummary(lower_bound_hubs, tried, proven)
     status = "timeout" if timed_out else "verified" if incumbent is not None else \
-             "unverified" if provisional is not None else "no_design_found"
+             "unverified" if provisional is not None else \
+             "candidate_configuration_error" if candidate_configuration_error else "no_design_found"
     if checker is None:
         diagnostics.append("Part 2 check_design is unavailable; provisional designs are never incumbents")
     return OuterSearchResult(status, incumbent, provisional, incumbent is not None, best_j,

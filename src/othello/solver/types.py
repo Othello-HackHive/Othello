@@ -51,7 +51,7 @@ class NodeOrderResult:
 
 F0Status = Literal[
     "constructed_unverified", "no_candidates", "unreachable_on_grid",
-    "unsupported_geometry", "timeout",
+    "unsupported_geometry", "candidate_configuration_error", "timeout",
 ]
 
 
@@ -88,7 +88,9 @@ class RouteSelectionResult:
     diagnostics: tuple[str, ...] = ()
 
 
-OuterSearchStatus = Literal["verified", "unverified", "no_design_found", "timeout"]
+OuterSearchStatus = Literal[
+    "verified", "unverified", "no_design_found", "candidate_configuration_error", "timeout",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,7 +117,7 @@ class OuterSearchResult:
 
 ImprovementStatus = Literal[
     "improved", "unchanged", "verified", "unverified",
-    "no_verified_design", "unsupported_geometry", "timeout",
+    "no_verified_design", "unsupported_geometry", "candidate_configuration_error", "timeout",
 ]
 
 

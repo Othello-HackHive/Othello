@@ -16,6 +16,10 @@ from shapely.ops import nearest_points, polylabel, unary_union
 from .types import Coord, HubCandidate, HubCandidateResult
 
 
+class HubCandidateLimitError(ValueError):
+    """The configured cap cannot retain every mandatory hub representative."""
+
+
 class _TimedOut(Exception):
     pass
 
@@ -395,7 +399,7 @@ def generate_hub_candidates(
             mandatory.update(own[index] for index in solution)
         _check_deadline(deadline)
         if len(mandatory) > cap:
-            raise ValueError(f"limits.hub_candidates={cap} is below the {len(mandatory)} distinct required representatives")
+            raise HubCandidateLimitError(f"limits.hub_candidates={cap} is below the {len(mandatory)} distinct required representatives")
 
         selected = set(mandatory)
         for tag in ("deepest", "node_aligned"):

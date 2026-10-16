@@ -13,6 +13,8 @@ from othello.solver import optimize_partitions
 from othello.solver import outer, route_selection
 from othello.solver.types import F0Result, ImprovementResult, RouteSelectionResult
 from othello.solver.tests.test_f0 import completed_plan, config as f0_config
+from othello.solver.tests._doubles import make_opening
+from othello.solver.hub_candidates import HubCandidateLimitError
 
 
 def _config():
@@ -110,6 +112,115 @@ def test_timeout_keeps_checker_verified_incumbent(monkeypatch):
     assert result.status == "timeout" and result.verified
     assert result.design["test_label"] == "first" and result.J == 8.0
     assert result.hub_count_status.tried[1] == "feasible"
+
+
+def test_checker_exception_after_valid_incumbent_preserves_ranking_and_recovers(monkeypatch):
+    ordinary, calls = _mock_pipeline(monkeypatch, {"first": 8.0, "bad": None, "better": 3.0})
+
+    def checker(plan, design, config):
+        if design["test_label"] == "bad":
+            raise RuntimeError("intermittent checker failure")
+        return ordinary(plan, design, config)
+
+    options = [_option("first", gap=0.0), _option("bad", gap=1.0),
+               _option("better", gap=2.0)]
+    result = optimize_partitions(NS(), {1: (options, "feasible")}, _config(), checker,
+                                 lower_bound_hubs=1)
+    assert result.status == "verified" and result.verified
+    assert result.design["test_label"] == "better" and result.J == 3.0
+    assert calls == ["first", "bad", "better"]
+    assert any("RuntimeError" in detail and "intermittent checker failure" in detail
+               for detail in result.diagnostics)
+
+
+@pytest.mark.parametrize("malformed", [None, NS(valid=True, metrics=None), NS(valid=True, metrics=NS(J=-1.0))])
+def test_malformed_checker_result_is_diagnostic_and_later_partition_can_verify(monkeypatch, malformed):
+    ordinary, _ = _mock_pipeline(monkeypatch, {"bad": None, "good": 4.0})
+
+    def checker(plan, design, config):
+        return malformed if design["test_label"] == "bad" else ordinary(plan, design, config)
+
+    result = optimize_partitions(NS(), {1: ([_option("bad", gap=0), _option("good", gap=1)],
+                                           "feasible")}, _config(), checker, lower_bound_hubs=1)
+    assert result.status == "verified" and result.design["test_label"] == "good"
+    assert result.J == 4.0 and any("checker failed" in detail for detail in result.diagnostics)
+
+
+def test_all_malformed_checker_responses_leave_only_a_provisional_design(monkeypatch):
+    _mock_pipeline(monkeypatch, {"bad": None})
+    result = optimize_partitions(NS(), {1: ([_option("bad")], "feasible")}, _config(),
+                                 checker=lambda *_: NS(valid=True, metrics=NS(J=float("nan"))),
+                                 lower_bound_hubs=1)
+    assert result.status == "unverified" and not result.verified
+    assert result.design is None and result.J is None
+    assert result.provisional_design is not None
+    assert result.hub_count_status.tried == {1: "unresolved"}
+    assert any("checker failed" in detail for detail in result.diagnostics)
+
+
+def test_candidate_limit_failure_in_f0_is_not_an_outer_crash():
+    plan, option = completed_plan()
+    plan.openings["LEFT"] = make_opening("LEFT", [(0, 1.5), (0, 2.5)])
+    plan.openings["RIGHT"] = make_opening("RIGHT", [(4, 1.5), (4, 2.5)])
+    cfg = f0_config(time_budget_s=5.0,
+                    limits=NS(partitions_per_H=1, beam_width=1, hub_candidates=1,
+                              orders_kept=2, routes_per_leg=1, exact_combo_limit=20))
+    result = optimize_partitions(plan, {1: ([option], "feasible")}, cfg,
+                                 checker=lambda *_: NS(valid=True, metrics=NS(J=1.0)),
+                                 lower_bound_hubs=1)
+    assert result.status == "candidate_configuration_error" and not result.verified
+    assert result.design is None and result.J is None
+    assert result.hub_count_status.tried == {1: "unresolved"}
+    assert any("candidate_configuration_error" in detail and "hub_candidates=1" in detail
+               for detail in result.diagnostics)
+
+
+def test_candidate_limit_failure_can_be_followed_by_a_valid_partition(monkeypatch):
+    checker, calls = _mock_pipeline(monkeypatch, {"bad": None, "good": 2.0},
+                                    {"bad": "candidate_configuration_error"})
+    result = optimize_partitions(NS(), {1: ([_option("bad", gap=0), _option("good", gap=1)],
+                                           "feasible")}, _config(), checker, lower_bound_hubs=1)
+    assert result.status == "verified" and result.design["test_label"] == "good"
+    assert result.J == 2.0 and calls == ["bad", "good"]
+    assert any("candidate_configuration_error" in detail for detail in result.diagnostics)
+
+
+def test_candidate_limit_failure_during_configuration_search_preserves_incumbent(monkeypatch):
+    original_configurations = outer._configuration_designs
+    checker, _ = _mock_pipeline(monkeypatch, {"good": 2.0})
+
+    def too_small(*args):
+        raise HubCandidateLimitError("limits.hub_candidates=1 is below the 2 distinct required representatives")
+
+    monkeypatch.setattr(outer, "generate_hub_candidates", too_small)
+    monkeypatch.setattr(outer, "_configuration_designs", original_configurations)
+    result = optimize_partitions(NS(), {1: ([_option("good")], "feasible")}, _config(),
+                                 checker, lower_bound_hubs=1)
+    assert result.status == "verified" and result.design["test_label"] == "good"
+    assert result.J == 2.0
+    assert any("candidate_configuration_error" in detail and "hub_candidates=1" in detail
+               for detail in result.diagnostics)
+
+
+def test_checker_exception_on_alternative_does_not_discard_baseline(monkeypatch):
+    ordinary, _ = _mock_pipeline(monkeypatch, {"good": 2.0, "bad": None})
+    alternative = _design(_option("bad"))
+    alternative["hubs"][0]["ring"]["legs"][0]["polyline"] = [
+        (1.0, 0.0), (1.0, 1.0), (2.0, 1.0), (2.0, 0.0),
+    ]
+    monkeypatch.setattr(outer, "_configuration_designs",
+                        lambda *args: iter((alternative,)))
+
+    def checker(plan, design, config):
+        if design["test_label"] == "bad":
+            raise RuntimeError("alternative checker failed")
+        return ordinary(plan, design, config)
+
+    result = optimize_partitions(NS(), {1: ([_option("good")], "feasible")}, _config(),
+                                 checker, lower_bound_hubs=1)
+    assert result.status == "verified" and result.design["test_label"] == "good"
+    assert result.J == 2.0
+    assert any("alternative" in detail and "RuntimeError" in detail for detail in result.diagnostics)
 
 
 def test_outer_accepts_only_better_verified_local_improvement(monkeypatch):

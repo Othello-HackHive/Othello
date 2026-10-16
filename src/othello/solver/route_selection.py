@@ -150,6 +150,16 @@ def _score_of_verified(check_result: Any) -> float | None:
     return float(score)
 
 
+def _invoke_checker(checker: Callable[[Any, Any, Any], Any], plan: Any,
+                    design: dict[str, Any], config: Any) -> tuple[Any | None, float | None, str | None]:
+    """Isolate an injected checker's failure from the search incumbent."""
+    try:
+        response = checker(plan, design, config)
+        return response, _score_of_verified(response), None
+    except Exception as exc:
+        return None, None, f"Part 2 checker failed ({type(exc).__name__}): {exc}"
+
+
 def select_whole_design_routes(
     plan: Any, design: dict[str, Any], config: Any,
     checker: Callable[[Any, Any, Any], Any] | None = None,
@@ -176,20 +186,29 @@ def select_whole_design_routes(
     incumbent_j: float | None = None
     incumbent_key: tuple | None = None
     checked = 0
+    checker_failures = 0
+    checker_diagnostics: list[str] = []
     combinations = 0
     mode: str = "none"
 
     def result(status: str, diagnostics: tuple[str, ...] = ()) -> RouteSelectionResult:
+        failures = tuple(checker_diagnostics)
+        if checker_failures > len(failures):
+            failures += (f"{checker_failures - len(failures)} additional checker failures",)
         return RouteSelectionResult(status, deepcopy(incumbent) if incumbent is not None else None,
-                                    incumbent is not None, incumbent_j, mode, combinations, checked, diagnostics)
+                                    incumbent is not None, incumbent_j, mode, combinations, checked,
+                                    diagnostics + failures)
 
     def evaluate(candidate: dict[str, Any]) -> None:
-        nonlocal checked, incumbent, incumbent_j, incumbent_key
+        nonlocal checked, checker_failures, incumbent, incumbent_j, incumbent_key
         _check_deadline(deadline)
         assert checker is not None
-        validation = checker(plan, candidate, config)
         checked += 1
-        score = _score_of_verified(validation)
+        _, score, failure = _invoke_checker(checker, plan, candidate, config)
+        if failure is not None:
+            checker_failures += 1
+            if len(checker_diagnostics) < 3:
+                checker_diagnostics.append(f"checker invocation {checked}: {failure}")
         if score is not None:
             key = (score, _geometry_key(candidate))
             if incumbent_key is None or key < incumbent_key:

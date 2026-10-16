@@ -9,7 +9,7 @@ from typing import Any
 
 from othello.routing import DistanceTable, RoutingCache
 
-from .hub_candidates import generate_hub_candidates
+from .hub_candidates import HubCandidateLimitError, generate_hub_candidates
 from .node_orders import enumerate_visiting_orders
 from .types import F0Result
 
@@ -81,7 +81,14 @@ def construct_f0_design(
         hub_id = f"H{index}"
         if hub_id in plan.nodes:
             raise ValueError(f"Generated hub ID {hub_id} collides with a node ID")
-        candidates = generate_hub_candidates(plan, territory, config, deadline)
+        try:
+            candidates = generate_hub_candidates(plan, territory, config, deadline)
+        except HubCandidateLimitError as exc:
+            if _expired(deadline):
+                return F0Result("timeout", diagnostics=("F0 deadline expired; no partial design returned",))
+            return F0Result("candidate_configuration_error", diagnostics=(
+                f"{territory.territory_id}: {exc}",
+            ))
         if candidates.status != "ready":
             return F0Result(candidates.status, diagnostics=tuple(
                 f"{territory.territory_id}: {detail}" for detail in candidates.diagnostics

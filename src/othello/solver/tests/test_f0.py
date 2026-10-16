@@ -137,6 +137,18 @@ def test_two_territories_form_two_complete_rings_and_failure_is_atomic():
     assert failed.status == "no_candidates" and failed.design is None
 
 
+def test_mandatory_hub_coverage_above_cap_is_structured_failure():
+    plan, option = completed_plan()
+    plan.openings["LEFT"] = make_opening("LEFT", [(0, 1.5), (0, 2.5)])
+    plan.openings["RIGHT"] = make_opening("RIGHT", [(4, 1.5), (4, 2.5)])
+    limited = config(limits=SimpleNamespace(hub_candidates=1, orders_kept=12))
+    result = construct_f0_design(plan, option, limited)
+    assert result.status == "candidate_configuration_error"
+    assert result.design is None
+    assert "limits.hub_candidates=1" in result.diagnostics[0]
+    assert "distinct required representatives" in result.diagnostics[0]
+
+
 def test_deterministic_construction_and_cache_reuse():
     plan, option = single_door_plan()
     cache = RoutingCache()

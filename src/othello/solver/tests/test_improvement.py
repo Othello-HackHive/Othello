@@ -14,10 +14,11 @@ from othello.routing import RoutingCache
 from othello.routing.types import RouteLibraryResult, RouteVariant
 from othello.solver import construct_f0_design, improve_design
 from othello.solver import improvement, route_selection
-from othello.solver.types import HubCandidateResult, RouteSelectionResult
+from othello.solver.types import HubCandidateResult, NodeOrderResult, RouteSelectionResult
 from othello.solver.tests.test_f0 import (
     completed_plan, config as f0_config, excluded_detour_plan, single_door_plan,
 )
+from othello.solver.tests._doubles import make_opening
 
 
 def _config(*, hubs=12, orders=12):
@@ -100,6 +101,55 @@ def test_checker_never_replaces_incumbent_with_worse_hub_move():
     result = improve_design(plan, design, _config(hubs=6), checker)
     assert result.status == "unchanged" and result.J == 0.0
     assert result.design == design and result.moves_considered > 0
+
+
+def test_checker_failures_during_moves_keep_verified_incumbent_and_allow_recovery():
+    plan, _ = completed_plan(node_point=(1.0, 1.0))
+    design = _one_node_design(plan)
+
+    def checker(plan, candidate, config):
+        _geometry_checked(plan, candidate)
+        point = tuple(candidate["hubs"][0]["location"])
+        if point == (3.0, 3.0):
+            return NS(valid=True, metrics=NS(J=5.0))
+        if point == (1.0, 1.0):
+            return NS(valid=True, metrics=NS(J=1.0))
+        raise RuntimeError("checker unavailable for candidate")
+
+    result = improve_design(plan, design, _config(hubs=6), checker)
+    assert result.status == "improved" and result.verified and result.J == 1.0
+    assert tuple(result.design["hubs"][0]["location"]) == (1.0, 1.0)
+    assert any("checker unavailable" in detail for detail in result.diagnostics)
+
+
+def test_malformed_checker_baseline_cannot_verify_but_later_move_can():
+    plan, _ = completed_plan(node_point=(1.0, 1.0))
+    design = _one_node_design(plan)
+
+    def checker(plan, candidate, config):
+        if tuple(candidate["hubs"][0]["location"]) == (3.0, 3.0):
+            return NS(valid=True, metrics=None)
+        return NS(valid=True, metrics=NS(J=2.0))
+
+    result = improve_design(plan, design, _config(hubs=6), checker)
+    assert result.status == "verified" and result.verified and result.J == 2.0
+    assert tuple(result.design["hubs"][0]["location"]) != (3.0, 3.0)
+    assert any("checker failed" in detail for detail in result.diagnostics)
+
+
+def test_candidate_limit_error_during_improvement_preserves_verified_design(monkeypatch):
+    plan, _ = completed_plan(node_point=(1.0, 1.0))
+    plan.openings["LEFT"] = make_opening("LEFT", [(0, 1.5), (0, 2.5)])
+    plan.openings["RIGHT"] = make_opening("RIGHT", [(4, 1.5), (4, 2.5)])
+    design = _one_node_design(plan)
+    monkeypatch.setattr(improvement, "select_whole_design_routes",
+                        lambda *args: RouteSelectionResult("no_verified_design"))
+    monkeypatch.setattr(improvement, "enumerate_visiting_orders",
+                        lambda *args: NodeOrderResult("unreachable_on_grid"))
+    result = improve_design(plan, design, _config(hubs=1), _valid(lambda _: 4.0))
+    assert result.status == "candidate_configuration_error"
+    assert result.verified and result.J == 4.0 and result.design == design
+    assert any("hub_candidates=1" in detail for detail in result.diagnostics)
 
 
 def test_node_order_move_preserves_all_visits_and_finds_better_order():
