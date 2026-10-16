@@ -425,3 +425,28 @@ def test_the_guide_uses_the_real_names_of_the_stack_region_and_log_groups():
 
 def test_the_guide_is_linked_from_the_docs_index():
     assert "DEPLOYMENT.md" in (ROOT / "docs" / "README.md").read_text(encoding="utf-8")
+
+
+def test_the_identity_debug_step_runs_only_by_hand_and_never_prints_the_token():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    )
+    steps = workflow["jobs"]["deploy"]["steps"]
+    names = [step.get("name", "") for step in steps]
+    debug = steps[
+        next(i for i, name in enumerate(names) if name.startswith("Show the identity"))
+    ]
+    sign_in = next(
+        i for i, name in enumerate(names) if name.startswith("Sign in to AWS")
+    )
+    assert (
+        debug["if"] == "github.event_name == 'workflow_dispatch'"
+        and names.index(debug["name"]) < sign_in
+    )
+    script = debug["run"]
+    assert "ACTIONS_ID_TOKEN_REQUEST_URL" in script and "claims.get(key)" in script
+    assert (
+        "print(token" not in script
+        and 'echo "$reply"' not in script
+        and 'echo "$token"' not in script
+    )
