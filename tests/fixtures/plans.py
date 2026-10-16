@@ -96,8 +96,10 @@ def _build_plan(
             room_graph[b].append(a)
 
     # Hub zone = room minus 0.5 m around the walls AND the windows (a window is a wall
-    # for clearance), so the zone never leaks into a window opening.
-    keep_away = unary_union([walls_m, windows_m]).buffer(HUB_CLEARANCE)
+    # for clearance), so the zone never leaks into a window opening.  Like Part 1, add the
+    # 1 mm tolerance: a buffer is a many-sided shape whose edge can sit ~0.6 mm closer than
+    # 0.5 m, and the solver rejects anything closer than 0.5 m.
+    keep_away = unary_union([walls_m, windows_m]).buffer(HUB_CLEARANCE + 0.001)
     hub_zones = {rid: polygons[rid].difference(keep_away) for rid in eligible_ids}
 
     return FloorPlan(
