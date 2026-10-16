@@ -1,7 +1,7 @@
 import networkx as nx
 import math
 import time
-from shapely.geometry import MultiPolygon, Polygon
+from shapely.geometry import LineString, MultiPolygon, Polygon
 
 from othello.models import SolverConfig
 from othello.reader import build_floor_plan_from_resplan
@@ -30,6 +30,27 @@ def sample_record():
     }
 
 
+def door_connected_record():
+    return {
+        "id": "door-connected",
+        "area": 100.0,
+        "inner": rectangle(0, 0, 100, 100),
+        "wall": MultiPolygon([
+            rectangle(48, 0, 52, 100),
+            rectangle(50, 48, 100, 52),
+        ]),
+        "window": MultiPolygon([]),
+        "door": MultiPolygon([
+            rectangle(48, 20, 52, 30),
+            rectangle(48, 70, 52, 80),
+        ]),
+        "living": rectangle(0, 0, 50, 100),
+        "bedroom": MultiPolygon([rectangle(50, 0, 100, 50)]),
+        "kitchen": rectangle(50, 50, 100, 100),
+        "graph": nx.Graph(),
+    }
+
+
 def test_normalises_scale_and_generates_development_nodes():
     plan = build_floor_plan_from_resplan(sample_record())
     assert plan.scale == 10.0
@@ -47,14 +68,37 @@ def test_lower_bound_and_disconnected_partitions():
 
 
 def test_door_links_form_a_connected_territory():
-    record = sample_record()
-    record["graph"].add_edge("living_0", "bedroom_0", type="via_door")
-    record["graph"].add_edge("living_0", "kitchen_0", type="via_door")
-    plan = build_floor_plan_from_resplan(record)
+    plan = build_floor_plan_from_resplan(door_connected_record())
     partitions, status = generate_partitions(plan, 1)
     assert status == "feasible"
     assert len(partitions) == 1
     assert partitions[0].territories[0].room_ids == ["R01", "R02", "R03"]
+
+
+def test_rooms_are_repaired_and_made_disjoint():
+    record = door_connected_record()
+    record["living"] = Polygon([(0, 0), (50, 100), (0, 100), (50, 0)])
+    plan = build_floor_plan_from_resplan(record)
+    assert plan.walls_m.is_valid
+    assert all(room.polygon_m.is_valid for room in plan.rooms.values())
+    assert all(
+        first.polygon_m.intersection(second.polygon_m).area <= 1e-12
+        for index, first in enumerate(plan.rooms.values())
+        for second in list(plan.rooms.values())[index + 1:]
+    )
+
+
+def test_door_gaps_cross_the_doorway_in_free_space_between_two_rooms():
+    plan = build_floor_plan_from_resplan(door_connected_record())
+    for opening in plan.openings.values():
+        if opening.kind != "door":
+            continue
+        gap = LineString(opening.gap_polyline_m)
+        assert len(opening.rooms) == 2
+        assert gap.length > 0
+        assert plan.free_space_m.covers(gap)
+        assert gap.intersection(plan.walls_m).length == 0
+        assert gap.intersection(plan.windows_m).length == 0
 
 
 def test_adjacency_is_not_a_zone_link():
