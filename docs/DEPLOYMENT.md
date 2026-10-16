@@ -35,7 +35,7 @@ Add `--parameter-overrides ExistingOidcProviderArn=<the ARN>` to that command if
 aws cloudformation describe-stacks --region us-east-1 --stack-name othello-cable-ring-github-role --query "Stacks[0].Outputs[0].OutputValue" --output text
 ```
 
-The role can only be used by workflows of the `Othello-HackHive/Othello` repository on the `main` branch.
+The role can only be used by workflows of the `Othello-HackHive/Othello` repository on the `main` branch. GitHub names that identity with the permanent numbers of the organization and the repository (`repo:Othello-HackHive@343091625/Othello@1420966048:ref:refs/heads/main`), and the role checks those numbers, so a renamed or re-created repository cannot use it.
 
 **2. Tell GitHub.** In the repository: Settings, Secrets and variables, Actions.
 
@@ -99,6 +99,7 @@ To go back to an earlier version, re-run the Deploy workflow on an older commit,
 | Symptom | Likely cause |
 |---|---|
 | Deploy workflow is skipped | `AWS_DEPLOY_ROLE_ARN` is not set yet, or CI on `main` was not green |
+| `Not authorized to perform sts:AssumeRoleWithWebIdentity` | AWS does not accept the identity GitHub presents. Start Deploy by hand from the Actions tab: a manual run prints that identity (`sub: ...`) and the saved role address in brackets, to compare with the role's trust rule in `infra/github-deploy-role.yaml`. Note that a run started from another branch has another `sub`, so it is refused on purpose |
 | `AccessDenied` in the Deploy log | the role is missing a permission: send the action name from the message (it looks like `lambda:CreateFunction`) and it gets added to `infra/github-deploy-role.yaml` |
 | Browser says "blocked by CORS" | the website address is not in `ALLOWED_ORIGINS` (it must match exactly, with `https://` and no trailing slash) |
 | `401` from the API | `x-api-key` missing or different from `OTHELLO_API_KEY` |
