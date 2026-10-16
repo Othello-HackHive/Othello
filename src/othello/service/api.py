@@ -29,7 +29,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from othello.io.errors import OthelloError
 from othello.service.config import ServiceConfig, build_job_config
-from othello.service.launcher import Launcher
+from othello.service.launcher import Launcher, LaunchError
 from othello.service.plan_json import parse_plan_json, record_from_json
 from othello.service.store import (
     ACTIVE,
@@ -306,7 +306,19 @@ class Api:
             time_budget_s=cleaned["time_budget_s"],
         )
         self.store.create(job, json.dumps(plan, separators=(",", ":")).encode("utf-8"))
-        self.launcher.launch(job.job_id)
+        try:
+            self.launcher.launch(job.job_id)
+        except LaunchError as problem:
+            self.store.delete(
+                job.job_id
+            )  # nothing will ever run it, so do not leave it queued
+            log.error("could not start job %s: %s", job.job_id, problem)
+            raise ApiError(
+                503,
+                "SERVICE_UNAVAILABLE",
+                "the solver could not be started",
+                "try again in a moment",
+            ) from problem
         return _json_response(
             202, {**self._view(job), "poll": f"/api/jobs/{job.job_id}/events?after=0"}
         )
