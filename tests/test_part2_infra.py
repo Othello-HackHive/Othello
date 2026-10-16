@@ -348,15 +348,33 @@ def test_the_deploy_role_trusts_only_this_repository_on_the_main_branch():
         statement["Principal"]
     )
     assert condition["token.actions.githubusercontent.com:aud"] == "sts.amazonaws.com"
-    subject = condition["token.actions.githubusercontent.com:sub"]
-    assert "StringLike" not in statement[
-        "Condition"
-    ] and "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/${Branch}" in str(subject)
+    subjects = [
+        entry["Fn::Sub"]
+        for entry in condition["token.actions.githubusercontent.com:sub"]
+    ]
+    # GitHub presents the identity with permanent ids (repo:ORG@ID/REPO@ID:...); the plain form is also accepted
+    assert subjects == [
+        "repo:${GitHubOrg}@${GitHubOrgId}/${GitHubRepo}@${GitHubRepoId}:ref:refs/heads/${Branch}",
+        "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/${Branch}",
+    ]
     assert (
-        role["Parameters"]["GitHubOrg"]["Default"] == "Othello-HackHive"
-        and role["Parameters"]["Branch"]["Default"] == "main"
+        "StringLike" not in statement["Condition"]
+    )  # no wildcards anywhere in the trust rule
+    params = role["Parameters"]
+    assert (
+        params["GitHubOrg"]["Default"] == "Othello-HackHive"
+        and params["GitHubRepo"]["Default"] == "Othello"
     )
-    assert "DeployRoleArn" in role["Outputs"]
+    assert params["Branch"]["Default"] == "main" and "DeployRoleArn" in role["Outputs"]
+
+
+def test_the_ids_in_the_trust_rule_are_the_ones_github_really_sent():
+    """Copied from the identity printed by a real run (see the 'Show the identity' step of the Deploy workflow)."""
+    params = load("github-deploy-role.yaml")["Parameters"]
+    assert (
+        params["GitHubOrgId"]["Default"] == "343091625"
+        and params["GitHubRepoId"]["Default"] == "1420966048"
+    )
 
 
 def test_the_deploy_role_has_no_blanket_permissions():
