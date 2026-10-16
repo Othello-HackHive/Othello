@@ -28,7 +28,7 @@ from typing import Any
 from othello.checker import check_design
 from othello.checker.validate import coerce_design
 from othello.io.atomic import atomic_write_text
-from othello.io.errors import NoDesignFoundError, OthelloError
+from othello.io.errors import NoDesignFoundError, OthelloError, OutputWriteError
 from othello.io.failure import FailureReport, failure_from_exception, write_failure_json
 from othello.io.official import write_official_json
 from othello.io.overlay import write_overlay_json
@@ -132,6 +132,25 @@ def load_plan_file(path: str | Path, cfg: SolverConfig) -> Any:
     return build_floor_plan(path, cfg)
 
 
+def ensure_out_dir(out_dir: str | Path) -> Path:
+    """Make sure the result folder exists and can be written to; otherwise say so clearly.
+
+    This is the one problem that is not about a single plan, so it is raised (not turned
+    into a failure note): there is nowhere to put a note.
+    """
+    folder = Path(out_dir)
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        probe = folder / ".write_test.tmp"
+        probe.write_bytes(b"")
+        probe.unlink()
+    except OSError as problem:
+        raise OutputWriteError(
+            f"cannot use the output folder {folder}: {problem}"
+        ) from problem
+    return folder
+
+
 def find_plan_files(source: str | Path) -> list[Path]:
     """One plan file, or every plan file in a folder (sorted, so runs repeat exactly)."""
     path = Path(source)
@@ -191,6 +210,7 @@ def run_plan(
     """
     config = cfg or SolverConfig()
     started = time.monotonic()
+    ensure_out_dir(out_dir)
     name_hint = (
         Path(source).stem
         if isinstance(source, str | Path)
@@ -462,7 +482,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(
     argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
 ) -> int:
-    """Exit code 0 when the plans were processed (even with no design); 2 for a bad command, 1 for a crash."""
+    """Exit code 0 when the plans were processed (even with no design); 2 for a bad command, 1 when results cannot be written."""
     args = build_parser().parse_args(argv)
     try:
         cfg = config_from_args(args, env)
@@ -470,6 +490,11 @@ def main(
     except (ConfigError, FileNotFoundError) as problem:
         print(f"error: {problem}", file=sys.stderr)
         return 2
+    try:
+        ensure_out_dir(args.out)
+    except OutputWriteError as problem:
+        print(f"error: {problem}", file=sys.stderr)
+        return 1
     outcomes = []
     for path in files:
         outcome = run_plan(
