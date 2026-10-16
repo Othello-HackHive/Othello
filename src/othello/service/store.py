@@ -61,6 +61,23 @@ class Job(BaseModel):
         return self.status not in ACTIVE
 
 
+def read_bytes_retrying(path: Path, attempts: int = 25, pause_s: float = 0.02) -> bytes:
+    """Read a file that another process may be replacing at this very moment.
+
+    On Windows a read that lands while a file is being swapped in fails with PermissionError for a few
+    milliseconds; trying again a moment later succeeds.  A file that really is missing still raises
+    FileNotFoundError at once.
+    """
+    for attempt in range(attempts):
+        try:
+            return path.read_bytes()
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(pause_s)
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 def new_job_id() -> str:
     return uuid.uuid4().hex
 
@@ -126,7 +143,7 @@ class LocalJobStore:
             return None
         path = self._dir(job_id) / "job.json"
         try:
-            return Job.model_validate_json(path.read_text(encoding="utf-8"))
+            return Job.model_validate_json(read_bytes_retrying(path).decode("utf-8"))
         except (FileNotFoundError, ValueError):
             return None
 
@@ -145,7 +162,7 @@ class LocalJobStore:
     def events(self, job_id: str, after: int = 0) -> list[dict[str, Any]]:
         path = self._dir(job_id) / "events.jsonl"
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = read_bytes_retrying(path).decode("utf-8").splitlines()
         except FileNotFoundError:
             return []
         found = []
@@ -176,7 +193,9 @@ class LocalJobStore:
         if kind not in FILE_KINDS or not valid_job_id(job_id):
             return None
         try:
-            return (self._dir(job_id) / "files" / FILE_KINDS[kind][0]).read_bytes()
+            return read_bytes_retrying(
+                self._dir(job_id) / "files" / FILE_KINDS[kind][0]
+            )
         except FileNotFoundError:
             return None
 

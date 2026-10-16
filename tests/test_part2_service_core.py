@@ -337,3 +337,31 @@ def test_the_temporary_work_folder_is_always_removed(store, tmp_path, monkeypatc
     job = queued(store, one_room_upload(), time_budget_s=8)
     execute_job(store, job.job_id, LIMITS, runner=stub_runner())
     assert not list(tmp_path.glob("othello_job_*"))
+
+
+def test_a_read_that_collides_with_a_file_swap_is_retried(store, monkeypatch):
+    """On Windows a file being replaced by another process briefly refuses to be read."""
+    job = make_job()
+    store.create(job, b"{}")
+    real = type(store.root).read_bytes
+    calls = {"n": 0}
+
+    def flaky(self):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise PermissionError("busy")
+        return real(self)
+
+    monkeypatch.setattr(type(store.root), "read_bytes", flaky)
+    assert store.get(job.job_id).job_id == job.job_id and calls["n"] == 3
+
+
+def test_a_file_that_stays_unreadable_is_not_hidden_for_ever(monkeypatch, tmp_path):
+    from othello.service import store as store_module
+
+    def never(self):
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(type(tmp_path), "read_bytes", never)
+    with pytest.raises(PermissionError):
+        store_module.read_bytes_retrying(tmp_path / "x", attempts=3, pause_s=0)

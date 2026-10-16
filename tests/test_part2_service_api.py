@@ -499,7 +499,11 @@ def test_a_job_that_runs_past_its_time_limit_is_killed_and_marked_failed(tmp_pat
         store, ServiceConfig(stale_grace_s=0), max_concurrent=1
     )
     try:
-        job = new_stored_job(store, budget=0.01)
+        job = new_stored_job(
+            store
+        )  # valid settings, so only the launcher's limit can stop it
+        job.time_budget_s = 0.01
+        store.save(job)
         launcher.launch(job.job_id)
         done = wait_for(store, job.job_id, {"failed", "succeeded"})
         assert done.status == "failed" and done.error["code"] == "TIMED_OUT"
