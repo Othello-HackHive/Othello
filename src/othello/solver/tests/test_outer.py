@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from othello.solver import optimize_partitions
-from othello.solver import outer
+from othello.solver import outer, route_selection
 from othello.solver.types import F0Result, ImprovementResult, RouteSelectionResult
 from othello.solver.tests.test_f0 import completed_plan, config as f0_config
 
@@ -222,7 +222,10 @@ def test_partition_input_order_does_not_change_result(monkeypatch):
 
 
 def test_missing_checker_yields_only_provisional_design(monkeypatch):
+    # The checker is looked up in two places (outer and route_selection); switch off both, so
+    # the test still means "no checker installed" once Part 2's checker exists in the project.
     monkeypatch.setattr(outer, "_optional_checker", lambda: None)
+    monkeypatch.setattr(route_selection, "_optional_checker", lambda: None)
     plan, option = completed_plan()
     config = f0_config(time_budget_s=5.0, weights=NS(length=1.0, bend=0.5, crossing=5.0,
                                                     overlap=1.0),
