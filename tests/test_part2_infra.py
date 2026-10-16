@@ -348,15 +348,33 @@ def test_the_deploy_role_trusts_only_this_repository_on_the_main_branch():
         statement["Principal"]
     )
     assert condition["token.actions.githubusercontent.com:aud"] == "sts.amazonaws.com"
-    subject = condition["token.actions.githubusercontent.com:sub"]
-    assert "StringLike" not in statement[
-        "Condition"
-    ] and "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/${Branch}" in str(subject)
+    subjects = [
+        entry["Fn::Sub"]
+        for entry in condition["token.actions.githubusercontent.com:sub"]
+    ]
+    # GitHub presents the identity with permanent ids (repo:ORG@ID/REPO@ID:...); the plain form is also accepted
+    assert subjects == [
+        "repo:${GitHubOrg}@${GitHubOrgId}/${GitHubRepo}@${GitHubRepoId}:ref:refs/heads/${Branch}",
+        "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/${Branch}",
+    ]
     assert (
-        role["Parameters"]["GitHubOrg"]["Default"] == "Othello-HackHive"
-        and role["Parameters"]["Branch"]["Default"] == "main"
+        "StringLike" not in statement["Condition"]
+    )  # no wildcards anywhere in the trust rule
+    params = role["Parameters"]
+    assert (
+        params["GitHubOrg"]["Default"] == "Othello-HackHive"
+        and params["GitHubRepo"]["Default"] == "Othello"
     )
-    assert "DeployRoleArn" in role["Outputs"]
+    assert params["Branch"]["Default"] == "main" and "DeployRoleArn" in role["Outputs"]
+
+
+def test_the_ids_in_the_trust_rule_are_the_ones_github_really_sent():
+    """Copied from the identity printed by a real run (see the 'Show the identity' step of the Deploy workflow)."""
+    params = load("github-deploy-role.yaml")["Parameters"]
+    assert (
+        params["GitHubOrgId"]["Default"] == "343091625"
+        and params["GitHubRepoId"]["Default"] == "1420966048"
+    )
 
 
 def test_the_deploy_role_has_no_blanket_permissions():
@@ -425,3 +443,48 @@ def test_the_guide_uses_the_real_names_of_the_stack_region_and_log_groups():
 
 def test_the_guide_is_linked_from_the_docs_index():
     assert "DEPLOYMENT.md" in (ROOT / "docs" / "README.md").read_text(encoding="utf-8")
+
+
+def test_the_identity_debug_step_runs_only_by_hand_and_never_prints_the_token():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    )
+    steps = workflow["jobs"]["deploy"]["steps"]
+    names = [step.get("name", "") for step in steps]
+    debug = steps[
+        next(i for i, name in enumerate(names) if name.startswith("Show the identity"))
+    ]
+    sign_in = next(
+        i for i, name in enumerate(names) if name.startswith("Sign in to AWS")
+    )
+    assert (
+        debug["if"] == "github.event_name == 'workflow_dispatch'"
+        and names.index(debug["name"]) < sign_in
+    )
+    script = debug["run"]
+    assert "ACTIONS_ID_TOKEN_REQUEST_URL" in script and "claims.get(key)" in script
+    assert (
+        "print(token" not in script
+        and 'echo "$reply"' not in script
+        and 'echo "$token"' not in script
+    )
+
+
+def test_the_deploy_step_never_hands_the_sam_tool_an_empty_setting():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    )
+    script = next(
+        s for s in workflow["jobs"]["deploy"]["steps"] if s.get("name") == "Deploy"
+    )["run"]
+    # the two settings that always have a value are given a default; the key is added only when it is set
+    assert "${ALLOWED_ORIGINS:-" in script and "${WORKER_CONCURRENCY:-0}" in script
+    assert (
+        'if [ -n "${OTHELLO_API_KEY}" ]; then' in script
+        and 'overrides+=("ApiKey=${OTHELLO_API_KEY}")' in script
+    )
+    first_use = script.index("ApiKey=${OTHELLO_API_KEY}")
+    assert script.rindex("if [ -n", 0, first_use) > script.index(
+        "overrides=("
+    )  # only inside the "if"
+    assert '--parameter-overrides "${overrides[@]}"' in script

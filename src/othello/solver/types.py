@@ -51,7 +51,7 @@ class NodeOrderResult:
 
 F0Status = Literal[
     "constructed_unverified", "no_candidates", "unreachable_on_grid",
-    "unsupported_geometry", "timeout",
+    "unsupported_geometry", "candidate_configuration_error", "timeout",
 ]
 
 
@@ -88,7 +88,9 @@ class RouteSelectionResult:
     diagnostics: tuple[str, ...] = ()
 
 
-OuterSearchStatus = Literal["verified", "unverified", "no_design_found", "timeout"]
+OuterSearchStatus = Literal[
+    "verified", "unverified", "no_design_found", "candidate_configuration_error", "timeout",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,10 +114,19 @@ class OuterSearchResult:
     configurations_considered: int = 0
     diagnostics: tuple[str, ...] = ()
 
+    @property
+    def submission_design(self) -> dict[str, Any] | None:
+        """Only the independently checked incumbent can be submitted."""
+        return self.design if self.verified and self.design is not None and self.J is not None else None
+
+    @property
+    def timeout_with_verified_design(self) -> bool:
+        return self.status == "timeout" and self.submission_design is not None
+
 
 ImprovementStatus = Literal[
     "improved", "unchanged", "verified", "unverified",
-    "no_verified_design", "unsupported_geometry", "timeout",
+    "no_verified_design", "unsupported_geometry", "candidate_configuration_error", "timeout",
 ]
 
 

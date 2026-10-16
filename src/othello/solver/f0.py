@@ -7,9 +7,10 @@ import math
 import time
 from typing import Any
 
-from othello.routing import DistanceTable, RoutingCache
+from othello.routing import RoutingCache
 
-from .hub_candidates import generate_hub_candidates
+from .candidate_tables import candidate_tables
+from .hub_candidates import HubCandidateLimitError, generate_hub_candidates
 from .node_orders import enumerate_visiting_orders
 from .types import F0Result
 
@@ -51,9 +52,33 @@ def _input_territories(plan: Any, partition: Any) -> tuple[Any, ...]:
     return tuple(sorted(territories, key=lambda territory: territory.territory_id))
 
 
-def construct_f0_design(
+def _nearest_node_order(hub_point: tuple[float, float], node_ids: tuple[str, ...],
+                        nodes: Mapping[str, Any]) -> tuple[str, ...]:
+    """Deterministic Manhattan proxy order; routing still validates every leg."""
+    remaining = set(node_ids)
+    position = hub_point
+    chosen: list[str] = []
+    while remaining:
+        node_id = min(remaining, key=lambda ident: (
+            abs(position[0] - nodes[ident].point_m[0]) +
+            abs(position[1] - nodes[ident].point_m[1]), ident))
+        chosen.append(node_id)
+        remaining.remove(node_id)
+        position = nodes[node_id].point_m
+    return tuple(chosen)
+
+
+def construct_quick_f0_design(
     plan: Any, partition: Any, config: Any, cache: RoutingCache | None = None,
     deadline: float | None = None,
+) -> F0Result:
+    """Try at most three valid hub positions per territory and one greedy order."""
+    return construct_f0_design(plan, partition, config, cache, deadline, _quick=True)
+
+
+def construct_f0_design(
+    plan: Any, partition: Any, config: Any, cache: RoutingCache | None = None,
+    deadline: float | None = None, *, _quick: bool = False,
 ) -> F0Result:
     """Try candidate hubs and ranked orders, retaining the first complete ring.
 
@@ -81,36 +106,44 @@ def construct_f0_design(
         hub_id = f"H{index}"
         if hub_id in plan.nodes:
             raise ValueError(f"Generated hub ID {hub_id} collides with a node ID")
-        candidates = generate_hub_candidates(plan, territory, config, deadline)
+        try:
+            candidates = generate_hub_candidates(plan, territory, config, deadline)
+        except HubCandidateLimitError as exc:
+            if _expired(deadline):
+                return F0Result("timeout", diagnostics=("F0 deadline expired; no partial design returned",))
+            return F0Result("candidate_configuration_error", diagnostics=(
+                f"{territory.territory_id}: {exc}",
+            ))
         if candidates.status != "ready":
             return F0Result(candidates.status, diagnostics=tuple(
                 f"{territory.territory_id}: {detail}" for detail in candidates.diagnostics
             ))
         chosen: dict[str, Any] | None = None
         chosen_coincident = 0
-        for candidate in candidates.candidates:
+        candidate_pool = candidates.candidates[:3] if _quick else candidates.candidates
+        for candidate, table in candidate_tables(plan, hub_id, territory.node_ids,
+                                                 candidate_pool, config, route_cache, deadline):
             if _expired(deadline):
                 return F0Result("timeout", diagnostics=("F0 deadline expired; no partial design returned",))
-            stops = {hub_id: candidate.point_m}
-            stops.update({node_id: plan.nodes[node_id].point_m for node_id in territory.node_ids})
-            try:
-                table = DistanceTable(plan, stops, config, route_cache, deadline)
-            except ValueError:
+            stops = table.stops
+            if _quick:
+                ordered_nodes = _nearest_node_order(candidate.point_m, tuple(territory.node_ids), plan.nodes)
+                sequences = ((hub_id, *ordered_nodes, hub_id),)
+            else:
+                orders = enumerate_visiting_orders(hub_id, territory.node_ids, table, config, deadline)
+                if orders.status in {"timeout", "unsupported_geometry"}:
+                    return F0Result(orders.status, diagnostics=tuple(
+                        f"{territory.territory_id}: {detail}" for detail in orders.diagnostics
+                    ))
+                if orders.status != "ready":
+                    continue
+                sequences = tuple(order.sequence for order in orders.orders)
+            for sequence in sequences:
                 if _expired(deadline):
                     return F0Result("timeout", diagnostics=("F0 deadline expired; no partial design returned",))
-                raise
-            orders = enumerate_visiting_orders(hub_id, territory.node_ids, table, config, deadline)
-            if orders.status in {"timeout", "unsupported_geometry"}:
-                return F0Result(orders.status, diagnostics=tuple(
-                    f"{territory.territory_id}: {detail}" for detail in orders.diagnostics
-                ))
-            if orders.status != "ready":
-                continue
-            for order in orders.orders:
-                if _expired(deadline):
-                    return F0Result("timeout", diagnostics=("F0 deadline expired; no partial design returned",))
-                sequence = order.sequence
-                if sequence != (hub_id, *order.node_ids, hub_id) or set(order.node_ids) != set(territory.node_ids):
+                if (sequence[0] != hub_id or sequence[-1] != hub_id or
+                        len(sequence) != len(territory.node_ids) + 2 or
+                        set(sequence[1:-1]) != set(territory.node_ids)):
                     raise ValueError("node-order result violates ring coverage or hub closure")
                 legs: list[dict[str, Any]] = []
                 ring_coincident = 0
@@ -150,8 +183,9 @@ def construct_f0_design(
             if chosen is not None:
                 break
         if chosen is None:
+            prefix = "quick attempt found no complete ring" if _quick else "no complete ring found on sampled routing graphs"
             return F0Result("unreachable_on_grid", diagnostics=(
-                f"{territory.territory_id}: no complete ring found on sampled routing graphs; geometric infeasibility is not proven",
+                f"{territory.territory_id}: {prefix}; geometric infeasibility is not proven",
             ))
         hubs.append(chosen)
         coincident_legs += chosen_coincident
@@ -161,7 +195,7 @@ def construct_f0_design(
     design = {
         "plan_id": plan.plan_id,
         "hubs": hubs,
-        "solver_notes": {"stage": "F0", "verification": "not_run",
+        "solver_notes": {"stage": "F0_quick" if _quick else "F0", "verification": "not_run",
                          "coincident_legs_encoded_as_duplicate_points": coincident_legs},
     }
     return F0Result("constructed_unverified", design, (

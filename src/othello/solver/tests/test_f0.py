@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from othello.routing import RoutingCache
 from othello.solver import construct_f0_design
+from othello.solver.f0 import construct_quick_f0_design
 from othello.solver.tests._doubles import make_case, make_config, make_node, make_opening, make_room
 
 
@@ -115,6 +116,21 @@ def test_single_door_retrace_keeps_both_crossings_and_all_node_visits():
     assert ring["legs"][2]["polyline"] == list(reversed(ring["legs"][1]["polyline"]))
 
 
+def test_quick_f0_uses_valid_candidates_and_complete_nearest_neighbour_ring(monkeypatch):
+    from othello.solver import f0
+
+    plan, option = single_door_plan()
+    monkeypatch.setattr(f0, "enumerate_visiting_orders", lambda *args:
+                        pytest.fail("quick F0 must not enumerate all node orders"))
+    first = construct_quick_f0_design(plan, option, config())
+    second = construct_quick_f0_design(plan, option, config())
+    assert first == second and first.status == "constructed_unverified"
+    _assert_design_structure_and_geometry(first.design, plan)
+    ring = first.design["hubs"][0]["ring"]
+    assert sorted(ring["sequence"][1:-1]) == ["N1", "N2"]
+    assert sum(leg["doors_used"].count("D1") for leg in ring["legs"]) == 2
+
+
 def test_two_territories_form_two_complete_rings_and_failure_is_atomic():
     rooms = [make_room("R1", box(0, 0, 4, 4)), make_room("R2", box(4, 0, 8, 4))]
     nodes = [make_node("N1", "R1", (1.0, 1.0)), make_node("N2", "R2", (7.0, 1.0))]
@@ -137,6 +153,18 @@ def test_two_territories_form_two_complete_rings_and_failure_is_atomic():
     assert failed.status == "no_candidates" and failed.design is None
 
 
+def test_mandatory_hub_coverage_above_cap_is_structured_failure():
+    plan, option = completed_plan()
+    plan.openings["LEFT"] = make_opening("LEFT", [(0, 1.5), (0, 2.5)])
+    plan.openings["RIGHT"] = make_opening("RIGHT", [(4, 1.5), (4, 2.5)])
+    limited = config(limits=SimpleNamespace(hub_candidates=1, orders_kept=12))
+    result = construct_f0_design(plan, option, limited)
+    assert result.status == "candidate_configuration_error"
+    assert result.design is None
+    assert "limits.hub_candidates=1" in result.diagnostics[0]
+    assert "distinct required representatives" in result.diagnostics[0]
+
+
 def test_deterministic_construction_and_cache_reuse():
     plan, option = single_door_plan()
     cache = RoutingCache()
@@ -145,6 +173,39 @@ def test_deterministic_construction_and_cache_reuse():
     second = construct_f0_design(plan, option, config(), cache)
     assert first == second
     assert cache.stats().path_hits > hits
+    assert first == construct_f0_design(plan, option, config(), RoutingCache())
+
+
+def test_f0_reuses_one_hanan_graph_for_all_order_legs(monkeypatch):
+    from othello.routing import table as table_module
+    from othello.solver import f0 as f0_module
+    from othello.solver.types import HubCandidate, HubCandidateResult
+
+    nodes = [make_node("N1", "R1", (1.0, 1.0)), make_node("N2", "R1", (3.0, 3.0))]
+    plan, territory = make_case(nodes=nodes)
+    plan.plan_id = "F0-shared-graph"
+    plan.windows_m = GeometryCollection()
+    plan.excluded_interior_rooms = []
+    option = partition(territory)
+    candidate = HubCandidate((2.0, 2.0), "R1", ("grid",), (), 4.0)
+    monkeypatch.setattr(f0_module, "generate_hub_candidates",
+                        lambda *args: HubCandidateResult("ready", (candidate,)))
+    original = table_module.build_routing_graph
+    builds = []
+
+    def count(*args, **kwargs):
+        builds.append((args[2], args[3]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(table_module, "build_routing_graph", count)
+    cache = RoutingCache()
+    first = construct_f0_design(plan, option, config(), cache)
+    assert first.status == "constructed_unverified"
+    _assert_design_structure_and_geometry(first.design, plan)
+    assert len(builds) == 1
+    assert cache.stats().graph_hits >= 1
+    assert first == construct_f0_design(plan, option, config(), cache)
+    assert len(builds) == 1
     assert first == construct_f0_design(plan, option, config(), RoutingCache())
 
 
