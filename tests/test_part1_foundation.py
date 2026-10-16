@@ -81,6 +81,7 @@ def test_lower_bound_and_disconnected_partitions():
 
 def test_door_links_form_a_connected_territory():
     plan = build_floor_plan_from_resplan(door_connected_record())
+    assert [opening.kind for opening in plan.openings.values()] == ["door", "door"]
     partitions, status = generate_partitions(plan, 1)
     assert status == "feasible"
     assert len(partitions) == 1
@@ -106,10 +107,36 @@ def test_rooms_are_repaired_and_made_disjoint():
     assert plan.walls_m.is_valid
     assert all(room.polygon_m.is_valid for room in plan.rooms.values())
     assert all(
-        first.polygon_m.intersection(second.polygon_m).area <= 1e-12
+        first.polygon_m.intersection(second.polygon_m).area == 0
         for index, first in enumerate(plan.rooms.values())
         for second in list(plan.rooms.values())[index + 1:]
     )
+
+
+def test_small_nested_storage_room_keeps_its_own_node_and_area():
+    record = sample_record()
+    record["storage"] = rectangle(10, 10, 20, 20)
+    plan = build_floor_plan_from_resplan(record)
+    living = next(room for room in plan.rooms.values() if room.kind == "living")
+    storage = next(room for room in plan.rooms.values() if room.kind == "storage")
+
+    assert len(plan.nodes) == 4
+    assert math.isclose(living.area_m2, 24.0)
+    assert math.isclose(storage.area_m2, 1.0)
+    assert living.polygon_m.intersection(storage.polygon_m).area == 0
+
+
+def test_touching_same_kind_source_rooms_remain_separate():
+    record = sample_record()
+    record["bedroom"] = MultiPolygon([
+        rectangle(50, 0, 100, 25),
+        rectangle(50, 25, 100, 50),
+    ])
+    plan = build_floor_plan_from_resplan(record)
+    bedrooms = [room for room in plan.rooms.values() if room.kind == "bedroom"]
+    assert len(bedrooms) == 2
+    assert sum(room.kind == "bedroom" for room in plan.eligible_rooms()) == 2
+    assert len(plan.nodes) == 4
 
 
 def test_overlapping_wall_parts_are_merged_before_repair():
@@ -137,6 +164,36 @@ def test_door_gaps_cross_the_doorway_in_free_space_between_two_rooms():
     # gaps must be vertical (across the wall), so routing edges cross them.
     assert gaps
     assert all(abs(gap.coords[0][0] - gap.coords[-1][0]) <= 1e-12 for gap in gaps)
+
+
+def test_touching_source_doors_keep_two_distinct_room_connections():
+    record = sample_record()
+    record["living"] = rectangle(50, 0, 100, 100)
+    record["bedroom"] = MultiPolygon([rectangle(0, 0, 50, 49), rectangle(0, 51, 50, 100)])
+    record["kitchen"] = MultiPolygon([])
+    record["wall"] = rectangle(48, 0, 52, 100)
+    record["door"] = MultiPolygon([rectangle(48, 40, 52, 50), rectangle(48, 50, 52, 60)])
+    plan = build_floor_plan_from_resplan(record)
+
+    doors = [opening for opening in plan.openings.values() if opening.kind == "door"]
+    assert len(doors) == 2
+    assert {frozenset(door.rooms) for door in doors} == {
+        frozenset({"R01", "R02"}), frozenset({"R01", "R03"})
+    }
+    assert plan.room_graph["R01"] == ["R02", "R03"]
+
+
+def test_overlapping_duplicate_doors_emit_one_crossing_contract():
+    record = door_connected_record()
+    record["door"] = MultiPolygon([
+        rectangle(48, 20, 52, 30),
+        rectangle(48, 22, 52, 28),
+    ])
+    plan = build_floor_plan_from_resplan(record)
+    doors = [opening for opening in plan.openings.values() if opening.kind == "door"]
+    assert len(doors) == 1
+    assert set(doors[0].rooms) == {"R01", "R02"}
+    assert any("duplicate crossing contract" in note for note in plan.repairs)
 
 
 def test_adjacency_is_not_a_zone_link():
@@ -184,6 +241,8 @@ def test_hub_zone_is_clipped_to_the_inner_free_space():
     record["living"] = rectangle(-10, 0, 50, 50)
     plan = build_floor_plan_from_resplan(record)
     assert plan.free_space_m.covers(plan.hub_zones_m["R01"])
+    assert plan.rooms["R01"].inside_inner
+    assert plan.rooms["R01"].polygon_m.difference(plan.inner_m).area == 0
 
 
 def test_geometry_verified_open_passage_is_a_zone_link():
@@ -194,6 +253,10 @@ def test_geometry_verified_open_passage_is_a_zone_link():
     plan = build_floor_plan_from_resplan(record)
     assert "R02" in plan.room_graph["R01"]
     assert [opening.kind for opening in plan.openings.values()] == ["open_passage"]
+    gap = LineString(next(iter(plan.openings.values())).gap_polyline_m)
+    assert gap.length > 0.1
+    assert abs(gap.coords[0][0] - gap.coords[-1][0]) <= 1e-12
+    assert plan.free_space_m.covers(gap)
 
 
 def test_resplan_8554_passage_uses_open_span_instead_of_corner_edge():
@@ -202,20 +265,25 @@ def test_resplan_8554_passage_uses_open_span_instead_of_corner_edge():
     from pathlib import Path
 
     from shapely import wkt
+    from shapely.geometry import GeometryCollection
+    from shapely.ops import unary_union
 
-    from othello.reader.load_plan import _passage_gap_polyline
+    from othello.reader.load_plan import _open_passage_gap
 
     fixture = json.loads((Path(__file__).parent / "data" / "resplan_8554_passage.json")
                          .read_text(encoding="utf-8"))
     assert fixture["source_plan_id"] == "8554"
     room_a = wkt.loads(fixture["room_a_wkt"])
     room_b = wkt.loads(fixture["room_b_wkt"])
-    gap = wkt.loads(fixture["candidate_gap_wkt"])
-    line = _passage_gap_polyline(room_a, room_b, gap, SolverConfig().tolerance_m)
+    free_space = unary_union([room_a, room_b])
+    line = _open_passage_gap(
+        room_a, room_b, GeometryCollection(), GeometryCollection(),
+        free_space, 0.3, SolverConfig().tolerance_m,
+    )
     assert line is not None
-    assert LineString(line).length > 3.8
-    assert abs(line[0][1] - line[1][1]) < 1e-9
-    assert gap.covers(LineString(line))
+    assert line.length > 3.8
+    assert abs(line.coords[0][1] - line.coords[1][1]) < 1e-9
+    assert free_space.covers(line)
 
 
 def test_scale_matches_the_problem_statement_example():
