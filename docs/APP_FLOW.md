@@ -92,7 +92,7 @@ Early exit: if any eligible room is over 100 m², return `no_design_found` with 
 | | |
 |---|---|
 | Does | Only for a verified design: official JSON; overlay JSON (zones, hubs, nodes, orders, rings, violation and crossing markers, metrics, bounds report); debug PNG |
-| Files | `out/<plan_id>.json`, `out/<plan_id>.overlay.json`, `out/<plan_id>.png`, `out/<plan_id>.log.txt` |
+| Files | `out/<plan_id>.json`, `out/<plan_id>.overlay.json`, `out/<plan_id>.png`, `out/<plan_id>.log.txt`, `out/<plan_id>.settings.json` (the settings used) |
 | On failure | `out/<plan_id>.failure.json` with reasons; no official JSON is written |
 
 ## 3. Time budget
@@ -121,7 +121,8 @@ t = 0                                                              t = time_budg
 | Time runs out with a verified incumbent | Return the incumbent | Official JSON |
 | Time runs out with no verified design | `no_design_found` | `failure.json`; plan scores zero |
 | Checker raises an internal error | Treat the design as invalid; log; never write official JSON | `failure.json` |
-| Output writer fails | Report the error; do not leave a partial official JSON | Logged |
+| Output writer fails | Report the error; files are written in one go, so no partial official JSON is left | `failure.json` (`OUTPUT_WRITE_FAILED`) |
+| Output folder cannot be used | Clear error, nothing is run; exit code 1 | Message on screen |
 
 ## 5. Fallback ladder (summary of TRD 6.4)
 
@@ -131,7 +132,7 @@ F0 simple valid constructor -> F1 full optimiser improves the incumbent -> F2 tr
 
 ```bash
 # one plan
-python -m othello.run path/to/plan.json --out out/ --time-budget 60
+python -m othello.run path/to/plan.pkl --out out/ --time-budget 60
 
 # a folder of plans (batch); writes a summary table
 python -m othello.run path/to/plans/ --out out/ --time-budget 30 --summary out/summary.csv
@@ -139,10 +140,22 @@ python -m othello.run path/to/plans/ --out out/ --time-budget 30 --summary out/s
 # optional switches (all map to SolverConfig)
 --transit-policy {forbid,avoid_if_possible,allow}
 --weights 1 5 1 0.5
+--config FILE        # a .json or .toml settings file
+--set KEY=VALUE      # any setting, e.g. weights.crossing=6 (repeatable)
+--no-picture         # skip the debug PNG
+--quiet              # no progress lines on screen
 ```
 
-Batch summary columns: `plan_id, status, hubs, lower_bound, proven_min, L, X, O, B, J, runtime_s, notes`.
-Exit code is 0 if the plan was processed (even `no_design_found`) and non-zero only for crashes in the runner itself.
+- **Input:** for now a pickled ResPlan record (`.pkl` or `.pickle`); a folder means every such file in it, in name order. The organiser JSON will plug in at one function (`load_plan_file`).
+- **Settings** come from, lowest to highest priority: built-in defaults, the `--config` file (or `OTHELLO_CONFIG`), `OTHELLO_*` environment variables (`OTHELLO_TIME_BUDGET_S=30`, nested with two underscores: `OTHELLO_WEIGHTS__CROSSING=6`), the friendly flags, then `--set`. A typo or impossible value is an error (exit code 2), never silently ignored.
+- **Per plan:** hub counts from the lower bound up to the lower bound + 2 are offered to Part 3; the search deadline is `time_budget_s x (1 - final_check_reserve_fraction)`; the winning design is re-checked and only then written. A search that ran out of time but holds a verified design still counts as a success.
+- **Files** go to `--out`, named after the plan's own id (see section 7).
+
+Batch summary columns: `plan_id, status, hubs, lower_bound, proven_min, L, X, O, B, J, runtime_s, notes`. `status` is `ok`, `no_design_found` or `failed`.
+
+Exit code: **0** if the plans were processed (even `no_design_found` or `failed`), **2** for a bad command (settings, missing source), **1** if the result folder cannot be used. One bad plan never stops a batch.
+
+From Python: `othello.run.run_plan(source, out_dir, config)` and `run_batch(...)`; `source` may also be an already built `FloorPlan`.
 
 ## 7. What the frontend sees (Ritvik)
 
@@ -150,7 +163,9 @@ Ritvik's frontend reads files only:
 
 1. `<plan_id>.overlay.json`: everything needed to draw rooms, walls, doors, hubs, nodes, visiting order, rings, markers and metrics.
 2. `<plan_id>.json`: the official output (to display the submitted answer).
-3. `<plan_id>.failure.json` when no design exists, to show a clear message.
+3. `<plan_id>.failure.json` when no design exists, to show a clear message (field list: BACKEND_SCHEMA section 11).
+
+The field-by-field description of the overlay is [OVERLAY_FORMAT.md](OVERLAY_FORMAT.md); real example folders are in `tests/data/samples/`.
 
 The frontend never calls solver code. If it wants to run a plan from the UI, it calls the runner (`run_plan`) through whatever thin wrapper the team agrees on later. A wrapper is not part of v1.
 
