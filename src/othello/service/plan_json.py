@@ -67,7 +67,7 @@ class PlanUploadError(OthelloError):
 
     code = "BAD_INPUT"
     stage = "load"
-    hint = "upload a JSON file in the ResPlan layout: see docs/APP_FLOW.md (section 8) and tests/data/uploads/"
+    hint = "upload a JSON file in the ResPlan layout: see docs/API.md and the samples in tests/data/uploads/"
 
 
 # ---------------------------------------------------------------- JSON text

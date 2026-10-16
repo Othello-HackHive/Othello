@@ -49,11 +49,13 @@ jobs:
           src/othello/io
           src/othello/run.py
           src/othello/harness.py
+          src/othello/service
           src/othello/models/design.py
           src/othello/models/result.py
           tests/fixtures
           tests/mutations.py
           tests/make_samples.py
+          tests/make_uploads.py
           tests/test_part2_*.py
 
       # Shows style notes about everything else without failing the run.
