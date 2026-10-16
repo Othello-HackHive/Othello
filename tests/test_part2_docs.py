@@ -91,7 +91,13 @@ def test_the_overlay_section_points_to_the_real_reference_files():
 
 
 def test_every_relative_link_in_the_docs_points_at_a_file_that_exists():
-    for name in ("README.md", "BACKEND_SCHEMA.md", "APP_FLOW.md", "OVERLAY_FORMAT.md"):
+    for name in (
+        "README.md",
+        "BACKEND_SCHEMA.md",
+        "APP_FLOW.md",
+        "OVERLAY_FORMAT.md",
+        "BACKEND.md",
+    ):
         for target in re.findall(r"\]\(([^)#]+?)(?:#[^)]*)?\)", doc(name)):
             if target.startswith(("http", "mailto")):
                 continue
@@ -167,3 +173,28 @@ def test_every_error_code_the_api_can_send_is_in_the_doc():
         "INTERNAL_ERROR"
     }
     assert len(codes) >= 10 and [c for c in codes if f"`{c}`" not in api_doc()] == []
+
+
+def test_the_backend_overview_names_real_folders_modules_and_commands():
+    text = doc("BACKEND.md")
+    root = Path(__file__).resolve().parents[1]
+    for folder in (
+        "src/othello/models",
+        "src/othello/reader",
+        "src/othello/territory",
+        "src/othello/routing",
+        "src/othello/solver",
+        "src/othello/checker",
+        "src/othello/io",
+        "src/othello/service",
+        "infra",
+        "tests",
+    ):
+        assert f"`{folder}/`" in text and (root / folder).is_dir(), folder
+    for module in ("othello.run", "othello.harness", "othello.service.local_server"):
+        assert f"python -m {module}" in text
+        importlib.import_module(module)
+    assert (
+        "tests/try_runner.py" in text and (root / "tests" / "try_runner.py").is_file()
+    )
+    assert "BACKEND.md" in doc("README.md")

@@ -483,3 +483,29 @@ def test_the_pieces_are_built_once_from_the_environment(aws, monkeypatch):
         and store.table == TABLE
     )
     assert api.launcher.worker_function == "worker-fn"
+
+
+def test_the_worker_runs_with_only_the_settings_the_template_gives_it(
+    store, aws, monkeypatch
+):
+    """Found by the first real deploy: the worker crashed asking for WORKER_FUNCTION, which only the API has."""
+    monkeypatch.setattr(lh, "_cache", {})  # a fresh container: nothing prepared
+    monkeypatch.setenv("JOBS_TABLE", TABLE)
+    monkeypatch.setenv("JOBS_BUCKET", BUCKET)
+    monkeypatch.delenv("WORKER_FUNCTION", raising=False)
+    job = make_job(settings={"time_budget_s": 8.0}, time_budget_s=8.0)
+    store.create(job, as_bytes(one_room_upload()))
+    assert lh.worker_handler({"job_id": job.job_id}) == {
+        "job_id": job.job_id,
+        "status": "succeeded",
+    }
+    assert store.get(job.job_id).status == "succeeded"
+
+
+def test_the_web_function_needs_the_worker_name_and_says_so_clearly(aws, monkeypatch):
+    monkeypatch.setattr(lh, "_cache", {})
+    monkeypatch.setenv("JOBS_TABLE", TABLE)
+    monkeypatch.setenv("JOBS_BUCKET", BUCKET)
+    monkeypatch.delenv("WORKER_FUNCTION", raising=False)
+    with pytest.raises(KeyError, match="WORKER_FUNCTION"):
+        lh.handler(http_event("GET", "/health"))
