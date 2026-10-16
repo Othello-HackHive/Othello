@@ -325,6 +325,94 @@ def test_shared_graph_changes_with_geometry_config_and_terminals():
     assert cache.stats().graph_count > initial_graphs
 
 
+def test_plan_wide_unsupported_geometry_is_reused_and_content_invalidated(monkeypatch):
+    from othello.routing import table as table_module
+
+    plan = make_plan(inner=box(0, 0, 10, 10), rooms=[
+        make_room("R1", box(0, 0, 6, 10)), make_room("R2", box(5, 0, 10, 10)),
+    ])
+    stops = {"A": (1, 1), "B": (2, 2), "C": (3, 3)}
+    cfg = make_config(weights=SimpleNamespace(length=1.0, bend=0.5))
+    cache = RoutingCache(max_graphs=2)
+    original = table_module.build_routing_graph
+    calls = []
+
+    def counted(*args):
+        calls.append((args[2], args[3]))
+        return original(*args)
+
+    monkeypatch.setattr(table_module, "build_routing_graph", counted)
+    table = DistanceTable(plan, stops, cfg, cache)
+    first = table.get_route("A", "B")
+    assert first.status == "unsupported_geometry" and "Overlapping room interiors" in first.diagnostics[0]
+    assert table.get_route("B", "C") == first
+    assert len(calls) == 1
+    stops["C"] = (3.5, 3.5)
+    table.stops["C"] = stops["C"]
+    assert table.get_route("B", "C").status == "unsupported_geometry"
+    assert len(calls) == 2
+    cfg.grid_step_m = 0.5
+    assert table.get_route("B", "C").status == "unsupported_geometry"
+    assert len(calls) == 3
+    assert cache.stats().graph_count <= cache.max_graphs
+    cache.invalidate(plan.plan_id)
+    assert table.get_route("B", "C").status == "unsupported_geometry"
+    assert len(calls) == 4
+    plan.rooms["R1"].polygon_m = box(0, 0, 5, 10)
+    recovered = table.get_route("A", "B")
+    assert recovered.status == "success"
+    assert recovered == DistanceTable(plan, table.stops, cfg, RoutingCache()).get_route("A", "B")
+    assert len(calls) == 6  # recovered query plus fresh-cache oracle
+
+
+def test_terminal_unsupported_geometry_and_timeout_are_not_shared_failures(monkeypatch):
+    from othello.routing import table as table_module
+    from othello.routing.types import GraphBuildResult
+
+    plan = make_plan(inner=box(0, 0, 10, 10), rooms=[
+        make_room("R1", box(0, 0, 5, 10)), make_room("R2", box(5, 0, 10, 10)),
+    ])
+    cfg = make_config(weights=SimpleNamespace(length=1.0, bend=0.5))
+    calls = []
+    original = table_module.build_routing_graph
+
+    def counted(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(table_module, "build_routing_graph", counted)
+    table = DistanceTable(plan, {"A": (1, 1), "B": (2, 2), "bad": (5, 5)}, cfg, RoutingCache())
+    assert table.get_route("A", "B").status == "unsupported_geometry"
+    assert table.get_route("A", "B").status == "unsupported_geometry"
+    assert len(calls) == 1
+    assert table.get_route("B", "A").status == "unsupported_geometry"
+    assert len(calls) == 2
+
+    def timed_out(*args):
+        calls.append(1)
+        return GraphBuildResult("timeout", diagnostics=("temporary deadline",))
+
+    monkeypatch.setattr(table_module, "build_routing_graph", timed_out)
+    table = DistanceTable(plan, {"A": (1, 1), "B": (2, 2)}, cfg, RoutingCache())
+    assert table.get_route("A", "B").status == "timeout"
+    assert table.get_route("A", "B").status == "timeout"
+    assert len(calls) == 4
+
+
+def test_cached_unsupported_opening_is_invalidated_by_opening_change():
+    opening = make_opening("D", ["R1", "R1"], [(5, 4), (5, 6)])
+    plan = make_plan(inner=box(0, 0, 10, 10), rooms=[
+        make_room("R1", box(0, 0, 5, 10)), make_room("R2", box(5, 0, 10, 10)),
+    ], openings=[opening])
+    cfg = make_config(weights=SimpleNamespace(length=1.0, bend=0.5))
+    table = DistanceTable(plan, {"A": (1, 5), "B": (9, 5)}, cfg, RoutingCache())
+    bad = table.get_route("A", "B")
+    assert bad.status == "unsupported_geometry" and "two interior rooms" in bad.diagnostics[0]
+    opening.rooms = ["R1", "R2"]
+    recovered = table.get_route("A", "B")
+    assert recovered.status == "success" and recovered.opening_ids == ("D",)
+
+
 @pytest.mark.parametrize("case,expected_status", [
     ("outside_free_space", "unsupported_geometry"),
     ("inside_window", "unreachable_on_grid"),

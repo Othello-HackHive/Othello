@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from othello.routing import RoutingCache
 from othello.solver import construct_f0_design
+from othello.solver.f0 import construct_quick_f0_design
 from othello.solver.tests._doubles import make_case, make_config, make_node, make_opening, make_room
 
 
@@ -113,6 +114,21 @@ def test_single_door_retrace_keeps_both_crossings_and_all_node_visits():
     assert sum(leg["doors_used"].count("D1") for leg in ring["legs"]) == 2
     assert ring["sequence"][-1] == hub["hub_id"]
     assert ring["legs"][2]["polyline"] == list(reversed(ring["legs"][1]["polyline"]))
+
+
+def test_quick_f0_uses_valid_candidates_and_complete_nearest_neighbour_ring(monkeypatch):
+    from othello.solver import f0
+
+    plan, option = single_door_plan()
+    monkeypatch.setattr(f0, "enumerate_visiting_orders", lambda *args:
+                        pytest.fail("quick F0 must not enumerate all node orders"))
+    first = construct_quick_f0_design(plan, option, config())
+    second = construct_quick_f0_design(plan, option, config())
+    assert first == second and first.status == "constructed_unverified"
+    _assert_design_structure_and_geometry(first.design, plan)
+    ring = first.design["hubs"][0]["ring"]
+    assert sorted(ring["sequence"][1:-1]) == ["N1", "N2"]
+    assert sum(leg["doors_used"].count("D1") for leg in ring["legs"]) == 2
 
 
 def test_two_territories_form_two_complete_rings_and_failure_is_atomic():

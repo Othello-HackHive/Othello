@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from othello.routing import DistanceTable, RoutingCache
 
-from .f0 import construct_f0_design
+from .f0 import construct_f0_design, construct_quick_f0_design
 from .hub_candidates import HubCandidateLimitError, generate_hub_candidates
 from .node_orders import enumerate_visiting_orders
 from .route_selection import _invoke_checker, _optional_checker, select_whole_design_routes
@@ -199,11 +199,15 @@ def optimize_partitions(
         partition_cap = config.limits.partitions_per_H
         configuration_cap = config.limits.beam_width
         budget = float(config.time_budget_s)
+        reserve_fraction = float(getattr(config, "final_check_reserve_fraction", 0.0))
     except (AttributeError, TypeError, ValueError) as exc:
         raise ValueError("config needs limits.partitions_per_H, limits.beam_width and time_budget_s") from exc
     if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0
            for value in (partition_cap, configuration_cap)) or not math.isfinite(budget) or budget <= 0:
         raise ValueError("outer search limits and time_budget_s must be positive")
+    if (isinstance(getattr(config, "final_check_reserve_fraction", 0.0), bool)
+            or not math.isfinite(reserve_fraction) or not 0 <= reserve_fraction < 1):
+        raise ValueError("final_check_reserve_fraction must be in [0, 1)")
     counts = sorted(partition_batches)
     if any(isinstance(count, bool) or not isinstance(count, int) or count <= 0 for count in counts):
         raise ValueError("hub-count keys must be positive integers")
@@ -219,7 +223,7 @@ def optimize_partitions(
         raise ValueError("lower_bound_hubs must be a positive integer")
     if counts[0] < lower_bound_hubs:
         raise ValueError("partition batches cannot start below the supplied hub lower bound")
-    budget_deadline = time.monotonic() + budget
+    budget_deadline = time.monotonic() + budget * (1 - reserve_fraction)
     effective_deadline = min(deadline, budget_deadline) if deadline is not None else budget_deadline
     route_cache = cache if cache is not None else RoutingCache()
     checker = checker if checker is not None else _optional_checker()
@@ -263,6 +267,25 @@ def optimize_partitions(
             try:
                 _check(effective_deadline)
                 partitions_seen += 1
+                gap = float(option.area_gap_m2)
+                quick = construct_quick_f0_design(plan, option, config, route_cache, effective_deadline)
+                if quick.status == "timeout":
+                    raise _Deadline
+                quick_signature = None
+                if quick.status == "constructed_unverified" and quick.design is not None:
+                    quick_signature = _design_key(quick.design)
+                    if provisional is None:
+                        provisional = deepcopy(quick.design)
+                    if checker is not None:
+                        _, score, failure = _invoke_checker(checker, plan, quick.design, config)
+                        if failure is not None:
+                            diagnostics.append(f"H={count}: quick F0 {failure}")
+                        if score is not None:
+                            accept(quick.design, score, count, gap)
+                    _check(effective_deadline)
+                else:
+                    diagnostics.append(f"H={count}: quick F0 {quick.status}: {'; '.join(quick.diagnostics)}")
+                    candidate_configuration_error |= quick.status == "candidate_configuration_error"
                 baseline = construct_f0_design(plan, option, config, route_cache, effective_deadline)
                 if baseline.status == "timeout":
                     raise _Deadline
@@ -272,8 +295,7 @@ def optimize_partitions(
                     continue
                 if provisional is None:
                     provisional = deepcopy(baseline.design)
-                gap = float(option.area_gap_m2)
-                if checker is not None:
+                if checker is not None and _design_key(baseline.design) != quick_signature:
                     _, score, failure = _invoke_checker(checker, plan, baseline.design, config)
                     if failure is not None:
                         diagnostics.append(f"H={count}: F0 {failure}")
@@ -363,6 +385,9 @@ def optimize_partitions(
     status = "timeout" if timed_out else "verified" if incumbent is not None else \
              "unverified" if provisional is not None else \
              "candidate_configuration_error" if candidate_configuration_error else "no_design_found"
+    if timed_out:
+        diagnostics.append("Search timed out with a checker-verified incumbent retained" if incumbent is not None
+                           else "Search timed out without a checker-verified design")
     if checker is None:
         diagnostics.append("Part 2 check_design is unavailable; provisional designs are never incumbents")
     return OuterSearchResult(status, incumbent, provisional, incumbent is not None, best_j,

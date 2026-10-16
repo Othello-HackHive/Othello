@@ -38,6 +38,9 @@ class GraphBuildResult:
     fallback_used: bool = False
     attempts: tuple[GraphAttempt, ...] = ()
     diagnostics: tuple[str, ...] = ()
+    # True only for deterministic plan-wide geometry validation failures.
+    # Terminal-specific failures and timeouts must not poison other legs.
+    cacheable_unsupported: bool = False
 
 
 @dataclass(frozen=True, slots=True)

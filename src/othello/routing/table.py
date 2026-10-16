@@ -121,6 +121,9 @@ class DistanceTable:
         built = build_routing_graph(self.plan, self.stops, from_id, to_id,
                                     self.config, self.deadline)
         if built.status != "ready":
+            if built.status == "unsupported_geometry" and built.diagnostics:
+                failure_key = replace(graph_key, leg=None) if built.cacheable_unsupported else graph_key
+                self.cache.put_unsupported_geometry(failure_key, built.diagnostics)
             return None, built.status, built.diagnostics
         graph = validate_graph(built.graph, self.deadline)
         shareable_mode = ("allow" if self.config.cable_transit_policy == "allow"
@@ -136,6 +139,11 @@ class DistanceTable:
     def _select_leg_graph(self, graph_key: GraphKey, from_id: str, to_id: str
                           ) -> tuple[ValidatedGraph | None, str | None, tuple[str, ...], bool]:
         """Prefer a pair graph, then a compatible shared Hanan graph."""
+        unsupported = self.cache.get_unsupported_geometry(graph_key, self.deadline)
+        if unsupported is None:
+            unsupported = self.cache.get_unsupported_geometry(replace(graph_key, leg=None), self.deadline)
+        if unsupported is not None:
+            return None, "unsupported_geometry", unsupported, False
         graph = self.cache.get_graph(graph_key, self.deadline)
         if graph is not None:
             return graph, None, (), False

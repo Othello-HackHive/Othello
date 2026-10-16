@@ -114,6 +114,15 @@ class OuterSearchResult:
     configurations_considered: int = 0
     diagnostics: tuple[str, ...] = ()
 
+    @property
+    def submission_design(self) -> dict[str, Any] | None:
+        """Only the independently checked incumbent can be submitted."""
+        return self.design if self.verified and self.design is not None and self.J is not None else None
+
+    @property
+    def timeout_with_verified_design(self) -> bool:
+        return self.status == "timeout" and self.submission_design is not None
+
 
 ImprovementStatus = Literal[
     "improved", "unchanged", "verified", "unverified",

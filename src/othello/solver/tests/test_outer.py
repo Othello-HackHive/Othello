@@ -60,6 +60,8 @@ def _mock_pipeline(monkeypatch, scores, statuses=None):
         return RouteSelectionResult("verified", design, True, score)
 
     monkeypatch.setattr(outer, "construct_f0_design", f0)
+    monkeypatch.setattr(outer, "construct_quick_f0_design", lambda *args:
+                        F0Result("unreachable_on_grid", diagnostics=("quick probe exhausted",)))
     monkeypatch.setattr(outer, "select_whole_design_routes", select)
     monkeypatch.setattr(outer, "_configuration_designs", lambda *args: ())
     monkeypatch.setattr(outer, "_improve_incumbent", lambda plan, design, config, checker, cache, deadline:
@@ -253,6 +255,70 @@ def test_outer_improvement_timeout_retains_best_verified_design(monkeypatch):
                                  _config(), checker)
     assert result.status == "timeout" and result.verified and result.J == 10.0
     assert result.design["test_label"] == "base"
+    assert result.timeout_with_verified_design
+    assert result.submission_design == result.design
+
+
+def test_quick_checker_failure_recovers_through_comprehensive_f0(monkeypatch):
+    checker, calls = _mock_pipeline(monkeypatch, {"full": 4.0})
+    quick = _design(_option("quick"))
+    monkeypatch.setattr(outer, "construct_quick_f0_design", lambda *args:
+                        F0Result("constructed_unverified", quick))
+    result = optimize_partitions(NS(), {1: ([_option("full")], "feasible")}, _config(),
+                                 checker, lower_bound_hubs=1)
+    assert result.verified and result.design["test_label"] == "full" and result.J == 4.0
+    assert calls == ["full"]
+    assert result.submission_design == result.design
+
+
+def test_quick_verified_incumbent_survives_full_failure_and_timeout(monkeypatch):
+    checker, _ = _mock_pipeline(monkeypatch, {"quick": 3.0})
+    quick = _design(_option("quick"))
+    monkeypatch.setattr(outer, "construct_quick_f0_design", lambda *args:
+                        F0Result("constructed_unverified", quick))
+    monkeypatch.setattr(outer, "construct_f0_design", lambda *args:
+                        F0Result("timeout", diagnostics=("full search expired",)))
+    result = optimize_partitions(NS(), {1: ([_option("full")], "feasible")}, _config(),
+                                 checker, lower_bound_hubs=1)
+    assert result.status == "timeout" and result.timeout_with_verified_design
+    assert result.submission_design["test_label"] == "quick" and result.J == 3.0
+
+
+def test_quick_verified_incumbent_is_not_replaced_by_worse_full_design(monkeypatch):
+    checker, _ = _mock_pipeline(monkeypatch, {"quick": 3.0, "full": 9.0})
+    quick = _design(_option("quick"))
+    monkeypatch.setattr(outer, "construct_quick_f0_design", lambda *args:
+                        F0Result("constructed_unverified", quick))
+    result = optimize_partitions(NS(), {1: ([_option("full")], "feasible")}, _config(),
+                                 checker, lower_bound_hubs=1)
+    assert result.status == "verified" and result.J == 3.0
+    assert result.submission_design["test_label"] == "quick"
+
+
+def test_quick_provisional_timeout_is_not_submittable(monkeypatch):
+    checker, _ = _mock_pipeline(monkeypatch, {})
+    quick = _design(_option("quick"))
+    monkeypatch.setattr(outer, "construct_quick_f0_design", lambda *args:
+                        F0Result("constructed_unverified", quick))
+    monkeypatch.setattr(outer, "construct_f0_design", lambda *args: F0Result("timeout"))
+    result = optimize_partitions(NS(), {1: ([_option("full")], "feasible")}, _config(),
+                                 checker, lower_bound_hubs=1)
+    assert result.status == "timeout" and not result.verified
+    assert result.design is None and result.J is None and result.submission_design is None
+    assert result.provisional_design == quick and not result.timeout_with_verified_design
+
+
+def test_final_reserve_shortens_only_configured_search_budget(monkeypatch):
+    checker, _ = _mock_pipeline(monkeypatch, {"one": 1.0})
+    observed = []
+    monkeypatch.setattr(outer, "construct_quick_f0_design", lambda plan, option, config, cache, deadline:
+                        observed.append(deadline) or F0Result("unreachable_on_grid"))
+    config = _config()
+    config.time_budget_s = 2.0
+    config.final_check_reserve_fraction = 0.25
+    before = time.monotonic()
+    optimize_partitions(NS(), {1: ([_option("one")], "feasible")}, config, checker)
+    assert observed and before + 1.45 <= observed[0] <= before + 1.60
 
 
 def test_route_selector_can_verify_a_checker_invalid_f0(monkeypatch):

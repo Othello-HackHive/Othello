@@ -413,6 +413,7 @@ def build_routing_graph(plan, terminals: Mapping[str, Coord], start_id: str, goa
     fallback = False
     budget = _Budget(deadline)
     terminal_vertices = {}
+    geometry_validated = False
     try:
         if deadline is not None and (not isinstance(deadline, Real) or not isfinite(deadline)):
             raise ValueError("deadline must be a finite absolute monotonic timestamp")
@@ -431,6 +432,7 @@ def build_routing_graph(plan, terminals: Mapping[str, Coord], start_id: str, goa
         if start_id not in terminal_vertices or goal_id not in terminal_vertices:
             raise ValueError("start_id and goal_id must identify supplied terminals")
         geometry = _read_geometry(plan, budget)
+        geometry_validated = True
         for terminal_id, coord in terminal_vertices.items():
             budget.check("terminal validation")
             point = Point(coord)
@@ -476,4 +478,5 @@ def build_routing_graph(plan, terminals: Mapping[str, Coord], start_id: str, goa
     except AttributeError as error:
         raise ValueError(f"Missing or malformed BACKEND_SCHEMA field: {error}") from error
     return GraphBuildResult(status, terminal_vertices=terminal_vertices, transit_mode=transit_mode,
-                            fallback_used=fallback, attempts=tuple(attempts), diagnostics=diagnostics)
+                            fallback_used=fallback, attempts=tuple(attempts), diagnostics=diagnostics,
+                            cacheable_unsupported=status == "unsupported_geometry" and not geometry_validated)

@@ -66,7 +66,8 @@ def plan_fingerprint(plan: Any, deadline: float | None = None) -> str:
             op = openings[op_id]
             kind = str(getattr(op, "kind", "door"))
             op_rooms = tuple(sorted(getattr(op, "rooms", ())))
-            hasher.update(f":opening:{op_id}:{kind}:{op_rooms}".encode("utf-8"))
+            declared_id = str(getattr(op, "opening_id", ""))
+            hasher.update(f":opening:{op_id}:{declared_id}:{kind}:{op_rooms}".encode("utf-8"))
             gap_coords = getattr(op, "gap_polyline_m", None) or getattr(op, "gap", None)
             if gap_coords is not None:
                 if isinstance(gap_coords, BaseGeometry):
@@ -123,6 +124,11 @@ class PathKey:
     bend_weight: float
 
 
+@dataclass(frozen=True, slots=True)
+class _UnsupportedGraph:
+    diagnostics: tuple[str, ...]
+
+
 def _defensive_copy_route(res: RouteSearchResult) -> RouteSearchResult:
     """Return an isolated copy of RouteSearchResult with a fresh polyline list."""
     poly = list(res.polyline) if res.polyline is not None else None
@@ -155,7 +161,8 @@ class RoutingCache:
         self.max_paths = max_paths
         self.max_graphs = max_graphs
         self._paths: OrderedDict[PathKey, RouteSearchResult] = OrderedDict()
-        self._graphs: OrderedDict[GraphKey, ValidatedGraph] = OrderedDict()
+        # Valid graphs and deterministic plan-wide failures share one LRU cap.
+        self._graphs: OrderedDict[GraphKey, ValidatedGraph | _UnsupportedGraph] = OrderedDict()
         self._path_hits = 0
         self._path_misses = 0
         self._graph_hits = 0
@@ -191,7 +198,7 @@ class RoutingCache:
     def get_graph(self, key: GraphKey, deadline: float | None = None) -> ValidatedGraph | None:
         """Retrieve a cached ValidatedGraph, enforcing deadline checks."""
         _check_deadline(deadline, "graph cache lookup")
-        if key in self._graphs:
+        if key in self._graphs and isinstance(self._graphs[key], ValidatedGraph):
             self._graphs.move_to_end(key)
             self._graph_hits += 1
             return self._graphs[key]
@@ -209,6 +216,26 @@ class RoutingCache:
                 self._graphs.popitem(last=False)
                 self._evictions += 1
         self._graphs[key] = graph
+
+    def get_unsupported_geometry(self, key: GraphKey, deadline: float | None = None) -> tuple[str, ...] | None:
+        """Retrieve a plan-wide deterministic geometry failure, if present."""
+        _check_deadline(deadline, "geometry failure cache lookup")
+        entry = self._graphs.get(key)
+        if not isinstance(entry, _UnsupportedGraph):
+            return None
+        self._graphs.move_to_end(key)
+        return entry.diagnostics
+
+    def put_unsupported_geometry(self, key: GraphKey, diagnostics: tuple[str, ...]) -> None:
+        """Store only caller-classified plan-wide failures under graph LRU bounds."""
+        if not diagnostics:
+            raise ValueError("unsupported geometry requires diagnostics")
+        if key in self._graphs:
+            self._graphs.move_to_end(key)
+        elif len(self._graphs) >= self.max_graphs:
+            self._graphs.popitem(last=False)
+            self._evictions += 1
+        self._graphs[key] = _UnsupportedGraph(tuple(diagnostics))
 
     def invalidate(self, plan_id: str | None = None) -> None:
         """Invalidate all cached items, or only those matching plan_id."""
