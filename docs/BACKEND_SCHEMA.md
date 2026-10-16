@@ -80,7 +80,7 @@ class Opening(BaseModel):              # a door or an open passage
     opening_id: str                    # "D1" or "P1"
     kind: str                          # door | open_passage | entrance
     rooms: list[str]                   # rooms it joins (entrance joins only one + outside)
-    gap_polyline_m: Polyline           # the gap line the cable must cross
+    gap_polyline_m: Polyline           # a short line ACROSS the doorway, in the wall plane, with both ends in free space; the cable crosses it (it is not drawn along the cable's travel direction)
     counts_for_zone: bool              # false for entrance [CONFIRMED slide 3]
 
 class FloorPlan(BaseModel):

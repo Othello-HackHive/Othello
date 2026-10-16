@@ -88,17 +88,31 @@ def test_rooms_are_repaired_and_made_disjoint():
     )
 
 
+def test_overlapping_wall_parts_are_merged_before_repair():
+    plan = build_floor_plan_from_resplan(door_connected_record())
+    # The source wall parts overlap by 8 square units.  They must form one
+    # solid 592-unit wall, not a 584-unit invalid-geometry repair with a hole.
+    # The two 40-unit door voids are subsequently cut from that wall.
+    assert math.isclose(plan.walls_m.area, 5.12, rel_tol=1e-12)
+
+
 def test_door_gaps_cross_the_doorway_in_free_space_between_two_rooms():
     plan = build_floor_plan_from_resplan(door_connected_record())
+    gaps = []
     for opening in plan.openings.values():
         if opening.kind != "door":
             continue
         gap = LineString(opening.gap_polyline_m)
+        gaps.append(gap)
         assert len(opening.rooms) == 2
         assert gap.length > 0
         assert plan.free_space_m.covers(gap)
         assert gap.intersection(plan.walls_m).length == 0
         assert gap.intersection(plan.windows_m).length == 0
+    # In this fixture, walls lie vertically and travel is horizontal.  Door
+    # gaps must be vertical (across the wall), so routing edges cross them.
+    assert gaps
+    assert all(abs(gap.coords[0][0] - gap.coords[-1][0]) <= 1e-12 for gap in gaps)
 
 
 def test_adjacency_is_not_a_zone_link():

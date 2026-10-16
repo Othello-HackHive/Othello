@@ -45,7 +45,11 @@ def _repair(geometry: Any, label: str, repairs: list[str], config: SolverConfig)
         return geometry
     if not config.repair_geometry:
         raise InputError(f"Invalid geometry for {label}")
-    repaired = make_valid(geometry)
+    # Repairing the members of an overlapping MultiPolygon separately can
+    # remove their shared area.  Merge first so layered wall rectangles remain
+    # solid before validity repair.
+    parts = _parts(geometry)
+    repaired = make_valid(unary_union(parts)) if len(parts) > 1 else make_valid(geometry)
     repairs.append(f"Repaired invalid geometry: {label}")
     return repaired
 
@@ -125,20 +129,37 @@ def _door_gap_line(
     normal_y /= normal_length
     centre = door_m.centroid
     half_depth = normal_length / 2
+    # The opening must lie across the doorway in the wall plane.  A cable
+    # crosses this segment when changing rooms; a segment along the travel
+    # direction would be collinear with the cable and never count as crossed.
+    long_x, long_y = -normal_y, normal_x
+    long_edge = max(nonzero_edges, key=lambda edge: math.hypot(*edge))
+    half_width = math.hypot(*long_edge) / 2
+
     extension_candidates = (2 * tolerance_m, 0.005, 0.01, 0.02, 0.05, 0.1)
     for extension in extension_candidates:
         distance = half_depth + extension
-        start = (centre.x - normal_x * distance, centre.y - normal_y * distance)
-        end = (centre.x + normal_x * distance, centre.y + normal_y * distance)
-        gap = LineString([start, end])
-        if not free_space_m.covers(gap):
+        probes = [
+            (centre.x - normal_x * distance, centre.y - normal_y * distance),
+            (centre.x + normal_x * distance, centre.y + normal_y * distance),
+        ]
+        if not all(free_space_m.covers(Point(probe)) for probe in probes):
             continue
-        start_rooms = [room_id for room_id, room in rooms.items() if room.polygon_m.buffer(tolerance_m).covers(Point(start))]
-        end_rooms = [room_id for room_id, room in rooms.items() if room.polygon_m.buffer(tolerance_m).covers(Point(end))]
+        start_rooms = [room_id for room_id, room in rooms.items() if room.polygon_m.buffer(tolerance_m).covers(Point(probes[0]))]
+        end_rooms = [room_id for room_id, room in rooms.items() if room.polygon_m.buffer(tolerance_m).covers(Point(probes[1]))]
         pairs = sorted({tuple(sorted((source, target))) for source in start_rooms for target in end_rooms if source != target})
-        if len(pairs) == 1:
-            room_ids = list(pairs[0])
-            return room_ids, [(float(start[0]), float(start[1])), (float(end[0]), float(end[1]))]
+        if len(pairs) != 1:
+            continue
+        for trim in (2 * tolerance_m, 0.005, 0.01, 0.02):
+            reach = half_width - trim
+            gap = LineString(
+                [
+                    (centre.x - long_x * reach, centre.y - long_y * reach),
+                    (centre.x + long_x * reach, centre.y + long_y * reach),
+                ]
+            )
+            if reach > 0 and free_space_m.covers(gap):
+                return list(pairs[0]), [(float(x), float(y)) for x, y in gap.coords]
     return None
 
 
@@ -229,6 +250,11 @@ def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig |
     )
     if not door_voids_m.is_empty:
         walls_m = walls_m.difference(door_voids_m)
+        # Boolean subtraction can make an otherwise valid wall layer invalid
+        # when raw door rectangles touch or overlap.  Part 3 deliberately
+        # refuses invalid geometry, so normalise the resulting obstacle layer
+        # before it becomes shared routing input.
+        walls_m = _polygonal_layer(walls_m, "wall after door voids", repairs, config)
     routing_obstacles_m = unary_union([walls_m, windows_m])
     free_space_m = _free_space(inner_m, walls_m, windows_m, repairs)
 
@@ -306,6 +332,9 @@ def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig |
             repairs.append(f"Dropped door D{index}: no free-space connection between exactly two rooms")
             continue
         door_rooms, gap_polyline_m = door_gap
+        if not all(rooms[room_id].inside_inner for room_id in door_rooms):
+            repairs.append(f"Dropped door D{index}: connection includes a non-interior room")
+            continue
         openings[f"D{index}"] = Opening(
             opening_id=f"D{index}",
             kind="door",
@@ -333,12 +362,17 @@ def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig |
         )
         if gap is None:
             continue
+        gap_polyline_m = _gap_polyline(gap)
+        gap_line = LineString(gap_polyline_m)
+        if not free_space_m.covers(gap_line) or gap_line.intersection(routing_obstacles_m).length > 0:
+            repairs.append(f"Dropped inferred passage P: no unambiguous free-space gap")
+            continue
         opening_id = f"P{sum(opening.kind == 'open_passage' for opening in openings.values()) + 1}"
         openings[opening_id] = Opening(
             opening_id=opening_id,
             kind="open_passage",
             rooms=[source_room, target_room],
-            gap_polyline_m=_gap_polyline(gap),
+            gap_polyline_m=gap_polyline_m,
             counts_for_zone=True,
         )
         room_graph[source_room].add(target_room)

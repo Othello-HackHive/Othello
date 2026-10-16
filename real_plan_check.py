@@ -55,8 +55,9 @@ def audit(dataset_path: Path, count: int, route_seconds: float) -> dict[str, obj
     routed_pairs = 0
     dropped_doors = 0
 
-    for record in records:
+    for record_index, record in enumerate(records, start=1):
         plan_id = str(record.get("id", "unknown"))
+        print(f"Auditing {record_index}/{len(records)}: plan {plan_id}", file=sys.stderr, flush=True)
         try:
             plan = build_floor_plan_from_resplan(record)
         except Exception as error:  # Report bad source records without stopping the batch.
