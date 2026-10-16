@@ -1,0 +1,63 @@
+name: CI
+
+# Runs on every push and every pull request into main.
+# No path filters on purpose: a required check that is skipped can block a merge.
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+# A newer push to the same branch cancels the older, now pointless, run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the project and the tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install "ruff==0.16.8" "matplotlib==3.9.2"
+
+      # Must pass: the checker, writers, models and tests owned by Part 2.
+      - name: Lint (Part 2 files)
+        run: >
+          ruff check
+          src/othello/checker
+          src/othello/io
+          src/othello/models/design.py
+          src/othello/models/result.py
+          tests/fixtures
+          tests/mutations.py
+          tests/test_part2_*.py
+
+      # Shows style notes about everything else without failing the run.
+      - name: Lint (whole repo, advisory)
+        continue-on-error: true
+        run: ruff check src tests
+
+      # Must pass: every test in the repo.
+      - name: Tests
+        run: python -m pytest -q
