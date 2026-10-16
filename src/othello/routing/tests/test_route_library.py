@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 
 import pytest
-from shapely.geometry import GeometryCollection, LineString, box
+from shapely.geometry import GeometryCollection, LineString, Polygon, box
 from shapely.ops import unary_union
 
 from conftest import make_config, make_opening, make_plan, make_room
@@ -181,6 +181,47 @@ def test_graph_and_path_cache_reused_across_library_calls():
     assert stats_first.graph_count == stats_second.graph_count == 1
     assert stats_second.path_hits > stats_first.path_hits
     assert stats_second.graph_hits > stats_first.graph_hits
+
+
+def test_library_reuses_shared_graph_across_legs_and_matches_fresh(monkeypatch):
+    from othello.routing import table as table_module
+
+    plan = two_doors()
+    cfg = config()
+    stops = {"A": (1.0, 4.0), "B": (9.0, 4.0), "C": (1.0, 7.0)}
+    original = table_module.build_routing_graph
+    builds = []
+
+    def count(*args, **kwargs):
+        builds.append((args[2], args[3]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(table_module, "build_routing_graph", count)
+    cache = RoutingCache()
+    table = DistanceTable(plan, stops, cfg, cache)
+    first = build_route_library(table, "A", "B", cfg)
+    second = build_route_library(table, "C", "B", cfg)
+    assert first.status == second.status == "ready"
+    assert builds == [("A", "B")]
+    assert {key.leg for key in cache._graphs} == {None}
+    assert second == build_route_library(table_for(plan, stops, cfg), "C", "B", cfg)
+    assert first == build_route_library(table_for(plan, stops, cfg), "A", "B", cfg)
+
+
+@pytest.mark.parametrize("fallback_first", [False, True])
+def test_library_preserves_pair_fallback_and_hanan_variants(fallback_first):
+    inner = Polygon([(0, 0), (2, 0), (2, 4), (4, 4), (4, 0), (6, 0), (6, 6), (0, 6)])
+    plan = make_plan(inner=inner)
+    stops = {"A": (1.123, 1.321), "B": (1.523, 1.321), "C": (5.321, 1.321)}
+    cfg = config(policy="forbid")
+    table = table_for(plan, stops, cfg)
+    targets = ("C", "B") if fallback_first else ("B", "C")
+    for target in targets:
+        warm = build_route_library(table, "A", target, cfg)
+        fresh = build_route_library(table_for(plan, stops, cfg), "A", target, cfg)
+        assert warm == fresh
+        assert warm.status == "ready"
+    assert {key.leg for key in table.cache._graphs} == {None, ("A", "C")}
 
 
 def test_expired_deadline_returns_timeout_without_routes():

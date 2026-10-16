@@ -148,6 +148,39 @@ def test_deterministic_construction_and_cache_reuse():
     assert first == construct_f0_design(plan, option, config(), RoutingCache())
 
 
+def test_f0_reuses_one_hanan_graph_for_all_order_legs(monkeypatch):
+    from othello.routing import table as table_module
+    from othello.solver import f0 as f0_module
+    from othello.solver.types import HubCandidate, HubCandidateResult
+
+    nodes = [make_node("N1", "R1", (1.0, 1.0)), make_node("N2", "R1", (3.0, 3.0))]
+    plan, territory = make_case(nodes=nodes)
+    plan.plan_id = "F0-shared-graph"
+    plan.windows_m = GeometryCollection()
+    plan.excluded_interior_rooms = []
+    option = partition(territory)
+    candidate = HubCandidate((2.0, 2.0), "R1", ("grid",), (), 4.0)
+    monkeypatch.setattr(f0_module, "generate_hub_candidates",
+                        lambda *args: HubCandidateResult("ready", (candidate,)))
+    original = table_module.build_routing_graph
+    builds = []
+
+    def count(*args, **kwargs):
+        builds.append((args[2], args[3]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(table_module, "build_routing_graph", count)
+    cache = RoutingCache()
+    first = construct_f0_design(plan, option, config(), cache)
+    assert first.status == "constructed_unverified"
+    _assert_design_structure_and_geometry(first.design, plan)
+    assert len(builds) == 1
+    assert cache.stats().graph_hits >= 1
+    assert first == construct_f0_design(plan, option, config(), cache)
+    assert len(builds) == 1
+    assert first == construct_f0_design(plan, option, config(), RoutingCache())
+
+
 def test_mid_construction_timeout_discards_completed_first_ring(monkeypatch):
     from othello.solver import f0
     rooms = [make_room("R1", box(0, 0, 4, 4)), make_room("R2", box(4, 0, 8, 4))]

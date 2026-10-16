@@ -8,8 +8,7 @@ import time
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
-from .astar import _TimedOut, astar_route, validate_graph
-from .grid import build_routing_graph
+from .astar import _TimedOut, astar_route
 from .table import DistanceTable
 from .types import Coord, Direction, RouteLibraryResult, RouteVariant, ValidatedGraph
 
@@ -78,15 +77,8 @@ def _leg_graph(table: DistanceTable, from_id: str, to_id: str,
                initial_direction: Direction | None, deadline: float | None
                ) -> tuple[ValidatedGraph | None, str | None, tuple[str, ...]]:
     key = table._make_path_key(from_id, to_id, initial_direction).graph_key
-    graph = table.cache.get_graph(key, deadline)
-    if graph is not None:
-        return graph, None, ()
-    built = build_routing_graph(table.plan, table.stops, from_id, to_id, table.config, deadline)
-    if built.status != "ready":
-        return None, built.status, built.diagnostics
-    graph = validate_graph(built.graph, deadline)
-    table.cache.put_graph(key, graph)
-    return graph, None, ()
+    graph, status, diagnostics, _ = table._select_leg_graph(key, from_id, to_id)
+    return graph, status, diagnostics
 
 
 def build_route_library(

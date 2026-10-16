@@ -95,8 +95,11 @@ class GraphKey:
     """Complete graph-generation signature.
 
     Includes the plan content hash, routing configuration, the complete sorted
-    terminal mapping that forms coordinate lines, and the leg pair under every
-    transit policy. Fallback-grid selection depends on that pair.
+    terminal mapping that forms coordinate lines. A concrete ``leg`` identifies
+    the pair whose connectivity chose the fallback grid and transit mode.
+    ``leg=None`` is reserved for a validated, unaugmented Hanan graph in the
+    policy's most restrictive mode; it is reusable only after confirming that
+    the requested distinct endpoints connect on that graph.
     """
 
     plan_sig: str
