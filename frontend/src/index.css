@@ -661,6 +661,17 @@ button {
   pointer-events: none;
 }
 
+.panel-empty {
+  margin-top: 24px;
+  padding: 20px;
+  color: #9aabb8;
+  border: 1px dashed rgba(122, 139, 154, 0.28);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.025);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .panel-reopen {
   position: fixed;
   z-index: 22;
