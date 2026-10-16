@@ -207,7 +207,11 @@ def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig |
         # clearance, so exclude their buffered geometry from the hub zone too.
         # Intersecting free space also guards against malformed development
         # records whose room polygon reaches beyond the inner boundary.
-        hub_zone = eligible_interior_m.difference(routing_obstacles_m.buffer(config.hub_wall_clearance_m))
+        # Shapely approximates circular buffer corners with line segments.
+        # Add the geometry tolerance so even an inscribed buffer edge stays at
+        # least the required 0.5 m from the true wall/window geometry.
+        hub_clearance_buffer_m = config.hub_wall_clearance_m + config.tolerance_m
+        hub_zone = eligible_interior_m.difference(routing_obstacles_m.buffer(hub_clearance_buffer_m))
         hub_zones_m[room.room_id] = hub_zone
         try:
             point_m = _safe_point(eligible_interior_m, routing_obstacles_m, config.hub_wall_clearance_m)
