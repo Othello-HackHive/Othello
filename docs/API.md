@@ -75,7 +75,7 @@ Each step is `{"stage", "message", "elapsed_s", ...}`. Stages come in this order
 
 ## Errors
 
-Every error answer is `{"error": {"code", "message", "hint"}}` with a matching HTTP status: `400` (`BAD_INPUT`, `BAD_SETTINGS`, `BAD_REQUEST`), `401` (`UNAUTHORIZED`), `404` (`NOT_FOUND`), `405` (`METHOD_NOT_ALLOWED`), `409` (`ALREADY_FINISHED`, `STILL_RUNNING`), `413` (`TOO_LARGE`), `415` (`UNSUPPORTED_MEDIA_TYPE`), `429` (`BUSY`), `500` (`INTERNAL_ERROR`, never with details).
+Every error answer is `{"error": {"code", "message", "hint"}}` with a matching HTTP status: `400` (`BAD_INPUT`, `BAD_SETTINGS`, `BAD_REQUEST`), `401` (`UNAUTHORIZED`), `404` (`NOT_FOUND`), `405` (`METHOD_NOT_ALLOWED`), `409` (`ALREADY_FINISHED`, `STILL_RUNNING`), `413` (`TOO_LARGE`), `415` (`UNSUPPORTED_MEDIA_TYPE`), `429` (`BUSY`), `500` (`INTERNAL_ERROR`, never with details), `503` (`SERVICE_UNAVAILABLE`: the solver could not be started; nothing was queued, try again).
 
 ## Safety and access
 

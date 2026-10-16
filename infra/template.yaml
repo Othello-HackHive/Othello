@@ -1,0 +1,192 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Othello cable ring solver: a web API (Lambda behind an HTTP API) that accepts a plan, starts a worker
+  (Lambda) that solves it, and keeps job records in DynamoDB and result files in S3.
+
+# What this creates, in plain words:
+#   JobsTable      a notebook that remembers every job (state, progress steps); old jobs delete themselves
+#   JobsBucket     a private folder for the result files (picture, overlay, official answer...)
+#   ApiFunction    answers web requests (upload, status, progress, results, cancel)
+#   WorkerFunction solves one plan (takes up to a few minutes); started by ApiFunction, never waits
+#   HttpApi        the public web address in front of ApiFunction
+#   two log groups so logs do not pile up for ever
+
+Parameters:
+  AllowedOrigins:
+    Type: String
+    Default: "http://localhost:3000,http://localhost:5173"
+    Description: Websites allowed to call the API from a browser (comma-separated), e.g. the Amplify address.
+  ApiKey:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Optional. When set, every /api request must send it in the x-api-key header.
+  DefaultBudgetSeconds:
+    Type: Number
+    Default: 60
+    Description: Solving time used when the upload does not choose one.
+  MaxBudgetSeconds:
+    Type: Number
+    Default: 120
+    MaxValue: 240
+    Description: The longest solving time an upload may ask for (the worker time-out is 300 s).
+  MaxActiveJobs:
+    Type: Number
+    Default: 10
+    Description: Jobs queued or running at the same time; more get a "try again" answer.
+  RetentionSeconds:
+    Type: Number
+    Default: 86400
+    Description: How long a finished job and its files are kept.
+  WorkerConcurrency:
+    Type: Number
+    Default: 0
+    Description: >
+      Most workers that may run at once (0 = no reservation). Reserving needs spare account capacity;
+      5 is a good value once the account's concurrency limit is above 10.
+
+Conditions:
+  ReserveWorkers: !Not [!Equals [!Ref WorkerConcurrency, 0]]
+
+Globals:
+  Function:
+    Architectures: [x86_64]
+    Environment:
+      Variables:
+        OTHELLO_API_ORIGINS: !Ref AllowedOrigins
+        OTHELLO_API_KEY: !Ref ApiKey
+        OTHELLO_API_DEFAULT_BUDGET_S: !Ref DefaultBudgetSeconds
+        OTHELLO_API_MAX_BUDGET_S: !Ref MaxBudgetSeconds
+        OTHELLO_API_MAX_ACTIVE_JOBS: !Ref MaxActiveJobs
+        OTHELLO_API_RETENTION_S: !Ref RetentionSeconds
+        MPLCONFIGDIR: /tmp/matplotlib
+
+Resources:
+  JobsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: job_id, AttributeType: S }
+        - { AttributeName: active, AttributeType: S }
+      KeySchema:
+        - { AttributeName: job_id, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: ActiveIndex # only queued/running jobs carry the "active" attribute
+          KeySchema:
+            - { AttributeName: active, KeyType: HASH }
+          Projection: { ProjectionType: KEYS_ONLY }
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+
+  JobsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-job-files # a safety net next to the table's own expiry
+            Status: Enabled
+            Prefix: jobs/
+            ExpirationInDays: 2
+          - Id: abort-unfinished-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 }
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-api"
+      RetentionInDays: 14
+
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-worker"
+      RetentionInDays: 14
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      # Browsers' cross-site rules (CORS) are answered by the application itself, so none here.
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 20 # a cheap guard against floods
+        ThrottlingRateLimit: 10
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: ApiLogGroup
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-api"
+      PackageType: Image
+      ImageConfig:
+        Command: ["othello.service.lambda_handler.handler"]
+      Timeout: 25 # under the HTTP API's 29 s limit
+      MemorySize: 1024
+      Environment:
+        Variables:
+          JOBS_TABLE: !Ref JobsTable
+          JOBS_BUCKET: !Ref JobsBucket
+          WORKER_FUNCTION: !Ref WorkerFunction
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }
+        - S3CrudPolicy: { BucketName: !Ref JobsBucket }
+        - LambdaInvokePolicy: { FunctionName: !Ref WorkerFunction }
+      Events:
+        Root:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /, Method: ANY }
+        Everything:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: "/{proxy+}", Method: ANY }
+    Metadata:
+      Dockerfile: infra/Dockerfile
+      DockerContext: ..
+      DockerTag: othello-api
+
+  WorkerFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: WorkerLogGroup
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-worker"
+      PackageType: Image
+      ImageConfig:
+        Command: ["othello.service.lambda_handler.worker_handler"]
+      Timeout: 300
+      MemorySize: 3008
+      EphemeralStorage: { Size: 1024 }
+      ReservedConcurrentExecutions: !If [ReserveWorkers, !Ref WorkerConcurrency, !Ref "AWS::NoValue"]
+      EventInvokeConfig:
+        MaximumRetryAttempts: 0 # a retry would run the same job twice
+        MaximumEventAgeInSeconds: 300
+      Environment:
+        Variables:
+          JOBS_TABLE: !Ref JobsTable
+          JOBS_BUCKET: !Ref JobsBucket
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }
+        - S3CrudPolicy: { BucketName: !Ref JobsBucket }
+    Metadata:
+      Dockerfile: infra/Dockerfile
+      DockerContext: ..
+      DockerTag: othello-worker
+
+Outputs:
+  ApiUrl:
+    Description: The web address to give to the frontend (no trailing slash)
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+  JobsTableName:
+    Value: !Ref JobsTable
+  JobsBucketName:
+    Value: !Ref JobsBucket
+  WorkerFunctionName:
+    Value: !Ref WorkerFunction

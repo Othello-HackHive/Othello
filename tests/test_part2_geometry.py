@@ -3,7 +3,7 @@
 import pytest
 from fixtures import designs
 from fixtures.plans import slide5_plan, tiny_plan
-from shapely.geometry import Point
+from shapely.geometry import GeometryCollection, MultiPolygon, Point
 
 from othello.checker.geometry import (
     NOT_AXIS_ALIGNED,
@@ -82,7 +82,9 @@ def test_point_in_polygon_allows_the_tolerance(tiny):
 
 
 def test_distance_to_a_wall(tiny):
-    assert distance_to((2, 2), tiny.walls_m) == pytest.approx(1.95, abs=1e-6)  # wall face at 0.05 and 3.95
+    assert distance_to((2, 2), tiny.walls_m) == pytest.approx(
+        1.95, abs=1e-6
+    )  # wall face at 0.05 and 3.95
 
 
 def test_clearance_half_a_metre(plan):
@@ -102,7 +104,9 @@ def test_good_slide5_cables_have_no_problems(plan, build):
     checker = FreeSpaceChecker.from_plan(plan)
     for hub in build().hubs:
         for leg in hub.ring.legs:
-            assert checker.issues(leg.polyline) == [], f"{hub.hub_id} {leg.from_id}->{leg.to_id}"
+            assert checker.issues(leg.polyline) == [], (
+                f"{hub.hub_id} {leg.from_id}->{leg.to_id}"
+            )
 
 
 def test_good_tiny_cables_have_no_problems(tiny):
@@ -112,23 +116,31 @@ def test_good_tiny_cables_have_no_problems(tiny):
 
 
 def test_cable_through_a_wall_is_caught_as_wall_only(plan):
-    kinds = kinds_in(FreeSpaceChecker.from_plan(plan), designs.broken_cable_through_wall())
+    kinds = kinds_in(
+        FreeSpaceChecker.from_plan(plan), designs.broken_cable_through_wall()
+    )
     assert kinds == {WALL_HIT}
 
 
 def test_cable_through_a_window_is_caught(plan):
-    kinds = kinds_in(FreeSpaceChecker.from_plan(plan), designs.broken_cable_through_window())
+    kinds = kinds_in(
+        FreeSpaceChecker.from_plan(plan), designs.broken_cable_through_window()
+    )
     assert WINDOW_HIT in kinds
     assert OUTSIDE in kinds  # it also leaves the house
 
 
 def test_slanted_cable_is_caught(plan):
-    kinds = kinds_in(FreeSpaceChecker.from_plan(plan), designs.broken_diagonal_segment())
+    kinds = kinds_in(
+        FreeSpaceChecker.from_plan(plan), designs.broken_diagonal_segment()
+    )
     assert kinds == {NOT_AXIS_ALIGNED}
 
 
 def test_cable_leaving_the_house_is_caught(plan):
-    kinds = kinds_in(FreeSpaceChecker.from_plan(plan), designs.broken_cable_outside_inner())
+    kinds = kinds_in(
+        FreeSpaceChecker.from_plan(plan), designs.broken_cable_outside_inner()
+    )
     assert OUTSIDE in kinds
     assert NOT_AXIS_ALIGNED not in kinds
 
@@ -163,7 +175,9 @@ def test_touching_a_wall_surface_is_fine_but_going_into_it_is_not(tiny):
     checker = FreeSpaceChecker.from_plan(tiny)
     # the wall between the rooms is 3.95 .. 4.05 wide
     assert checker.is_clear([(3.95, 0.5), (3.95, 1.0)])  # grazing its face
-    assert checker.is_clear([(3.9495, 0.5), (3.9495, 1.0)])  # 0.5 mm in: within tolerance
+    assert checker.is_clear(
+        [(3.9495, 0.5), (3.9495, 1.0)]
+    )  # 0.5 mm in: within tolerance
     kinds = {i.kind for i in checker.issues([(3.99, 0.5), (3.99, 1.0)])}  # 4 cm in
     assert kinds == {WALL_HIT}
 
@@ -175,3 +189,37 @@ def test_zero_length_pieces_are_ignored(tiny):
 
 def test_a_polyline_with_one_point_has_no_pieces(tiny):
     assert FreeSpaceChecker.from_plan(tiny).issues([(1.0, 1.0)]) == []
+
+
+# ------------------------------------------- plans with nothing to keep away from (no walls or windows)
+
+
+@pytest.mark.parametrize("empty", [GeometryCollection(), MultiPolygon([]), None])
+def test_an_empty_shape_is_infinitely_far_away_and_always_has_clearance(empty):
+    assert distance_to((1, 1), empty) == float("inf")
+    assert has_clearance((1, 1), empty, 0.5)
+
+
+def test_a_plan_without_any_walls_still_gets_a_verified_design():
+    """Found while smoke-testing the container image: an empty wall layer made every hub 'too close to a wall'."""
+    import json
+    import tempfile
+
+    from othello.models.config import SolverConfig
+    from othello.run import run_plan
+    from othello.service.plan_json import plan_from_json
+
+    upload = {
+        "id": "NO_WALLS",
+        "area": 64.0,
+        "inner": {
+            "type": "Polygon",
+            "coordinates": [[[0, 0], [80, 0], [80, 80], [0, 80], [0, 0]]],
+        },
+        "living": "POLYGON ((0 0, 80 0, 80 80, 0 80, 0 0))",
+    }
+    plan = plan_from_json(json.dumps(upload).encode())
+    outcome = run_plan(
+        plan, tempfile.mkdtemp(), SolverConfig(time_budget_s=8), picture=False
+    )
+    assert outcome.status == "ok" and outcome.hubs == 1

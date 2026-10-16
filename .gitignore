@@ -93,3 +93,6 @@ desktop.ini
 node_modules/
 .next/
 .vite/
+
+# --- AWS SAM build output ---
+.aws-sam/

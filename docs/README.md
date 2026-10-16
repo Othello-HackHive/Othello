@@ -10,6 +10,7 @@ Team Othello's v1 specification. The official 8-slide PPT is the final authority
 | [APP_FLOW.md](APP_FLOW.md) | Step-by-step run, time budget, failure and timeout paths, the command-line runner |
 | [OVERLAY_FORMAT.md](OVERLAY_FORMAT.md) | The overlay file field by field (for the frontend) |
 | [API.md](API.md) | The web API: upload a plan, follow progress, fetch results (for the frontend) |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | Putting the API on AWS: one-time setup, deploying, logs, taking it down |
 | [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) | Three backend parts, tasks, milestones, test gates, git workflow |
 | [ASSUMPTIONS.md](ASSUMPTIONS.md) | Confirmed / Assumed / Pending register and the organiser question list |
 

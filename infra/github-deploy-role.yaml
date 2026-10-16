@@ -1,0 +1,123 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  One-time setup: lets GitHub Actions of ONE repository deploy the Othello stack, without any stored
+  AWS password. GitHub proves who it is with a short-lived token (OpenID Connect); AWS hands back
+  temporary permissions, only to workflows running on the main branch of this repository.
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: Othello-HackHive
+  GitHubRepo:
+    Type: String
+    Default: Othello
+  Branch:
+    Type: String
+    Default: main
+  ExistingOidcProviderArn:
+    Type: String
+    Default: ""
+    Description: >
+      If this AWS account already trusts GitHub (for example from another project), paste the ARN of that
+      provider here. Leave empty to create it (an account can have only one).
+  StackName:
+    Type: String
+    Default: othello-cable-ring
+    Description: Name of the stack the workflow deploys (must match infra/samconfig.toml).
+
+Conditions:
+  CreateProvider: !Equals [!Ref ExistingOidcProviderArn, ""]
+
+Resources:
+  GitHubProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+      ThumbprintList: [6938fd4d98bab03faadb97b34396831e3780aea1]
+
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${StackName}-github-deploy"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRoleWithWebIdentity
+            Principal:
+              Federated: !If [CreateProvider, !Ref GitHubProvider, !Ref ExistingOidcProviderArn]
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/${Branch}"
+      Policies:
+        - PolicyName: deploy-othello-stack
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Stacks
+                Effect: Allow
+                Action: cloudformation:*
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${StackName}/*"
+                  - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/aws-sam-cli-managed-default/*"
+              - Sid: Transforms
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31"
+              - Sid: ReadOnlyLookups
+                Effect: Allow
+                Action: [cloudformation:GetTemplateSummary, cloudformation:ListStacks, sts:GetCallerIdentity, ecr:GetAuthorizationToken]
+                Resource: "*"
+              - Sid: AppResources
+                Effect: Allow
+                Action:
+                  - lambda:*
+                  - dynamodb:*
+                  - logs:*
+                  - apigateway:*
+                Resource: "*" # these services cannot be limited by name before the resources exist
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref AWS::Region
+              - Sid: FilesBucketAndDeployBucket
+                Effect: Allow
+                Action: s3:*
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::${StackName}-*"
+                  - !Sub "arn:${AWS::Partition}:s3:::${StackName}-*/*"
+                  - !Sub "arn:${AWS::Partition}:s3:::aws-sam-cli-managed-default-*"
+                  - !Sub "arn:${AWS::Partition}:s3:::aws-sam-cli-managed-default-*/*"
+              - Sid: ImageRepositories
+                Effect: Allow
+                Action: ecr:*
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${StackName}*"
+                  - !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/aws-sam-cli-managed-default*"
+              - Sid: RolesOfTheStackOnly
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:PassRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${StackName}-*"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-sam-cli-managed-default-*"
+
+Outputs:
+  DeployRoleArn:
+    Description: Put this in GitHub as the repository variable AWS_DEPLOY_ROLE_ARN
+    Value: !GetAtt DeployRole.Arn
