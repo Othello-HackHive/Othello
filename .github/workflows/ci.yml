@@ -51,6 +51,7 @@ jobs:
           src/othello/models/result.py
           tests/fixtures
           tests/mutations.py
+          tests/make_samples.py
           tests/test_part2_*.py
 
       # Shows style notes about everything else without failing the run.
