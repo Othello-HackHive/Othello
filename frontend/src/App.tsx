@@ -73,14 +73,14 @@ type CloudState = { status: string; jobId?: string; events: CloudEvent[]; error?
 type CloudPayload = { raw: Record<string, unknown>; viewer: Record<string, unknown>; settings: Record<string, unknown> | null; key: string };
 
 export default function App() {
-  const [planKey, setPlanKey] = useState<string>("BENCHMARK_6R");
+  const [planKey, setPlanKey] = useState<string>("");
   const [rawPlan, setRawPlan] = useState<Record<string, unknown>>(() => PRESET_JSON.BENCHMARK_6R);
-  const [planLabel, setPlanLabel] = useState("RESPLAN PRESET");
+  const [planLabel, setPlanLabel] = useState("");
   const [planError, setPlanError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [showZones, setShowZones] = useState(true);
   const [showRoutes, setShowRoutes] = useState(true);
-  const [panelCollapsed, setPanelCollapsed] = useState(() => window.matchMedia("(max-width: 860px)").matches);
+  const [panelCollapsed, setPanelCollapsed] = useState(true);
   const [modelView, setModelView] = useState(false);
   const modelViewRef = useRef(modelView);
   modelViewRef.current = modelView;
@@ -339,9 +339,10 @@ export default function App() {
     }
   };
 
-  const metrics = activeSolution?.metrics;
+  const hasSelectedPlan = planKey !== "";
+  const metrics = hasSelectedPlan ? activeSolution?.metrics : null;
   const scoredMetrics = isBackend && !overlayDraw?.metrics ? null : metrics;
-  const ruleChecks = activeSolution?.checks ?? [];
+  const ruleChecks = hasSelectedPlan ? activeSolution?.checks ?? [] : [];
   const knownChecks = ruleChecks.filter((check) => !check.na);
   const feasible = knownChecks.length > 0 && knownChecks.every((check) => check.pass);
   const hasFailures = knownChecks.some((check) => !check.pass);
@@ -513,7 +514,7 @@ export default function App() {
               }}
             />
             <div className="hero-actions">
-              <button type="button" className="primary-action" onClick={runSolver} disabled={runState === "solving" || cloudRunning || !plan}>
+              <button type="button" className="primary-action" onClick={runSolver} disabled={runState === "solving" || cloudRunning || !plan || !hasSelectedPlan}>
                 {runState === "solving" || cloudRunning ? <LoaderCircle size={16} className="spin" /> : <Play size={15} fill="currentColor" />}
                 {cloudRunning ? "SOLVING ON AWS…" : cloudPayloadRef.current && cloudAvailable ? "RERUN ON AWS" : runState === "solving" ? "REPLAYING…" : "REPLAY SOLUTION STEPS"}
               </button>
@@ -665,7 +666,7 @@ export default function App() {
             <h2>RULES &amp; SCORE</h2>
           </div>
           <div className="panel-head-actions">
-            <span
+            {hasSelectedPlan && <span
               className={
                 runState === "solving"
                   ? "validation-badge solving"
@@ -678,12 +679,18 @@ export default function App() {
             >
               <i className="led" />
               {badgeLabel}
-            </span>
+            </span>}
             <button type="button" className="panel-collapse" onClick={() => setPanelCollapsed(true)} aria-label="Collapse rules and score panel" aria-controls="rules-score-panel" aria-expanded={true} title="Collapse panel">
               <ChevronsRight size={16} />
             </button>
           </div>
         </div>
+        {!hasSelectedPlan ? (
+          <div className="panel-empty" role="status">
+            Select an example or upload a plan JSON to see its score and rule checks.
+          </div>
+        ) : (
+          <>
         <div className="source-line">
           {cloudRunning
             ? `AWS solver ${cloudState?.status} · ${cloudState?.events.at(-1)?.message ?? "waiting for progress"}`
@@ -784,6 +791,8 @@ export default function App() {
         </div>
         {warnings.length > 0 && (
           <p className="warn-note"><TriangleAlert size={11} /> {warnings[0]}{warnings.length > 1 ? ` (+${warnings.length - 1})` : ""}</p>
+        )}
+          </>
         )}
       </aside>
 
