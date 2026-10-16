@@ -468,3 +468,23 @@ def test_the_identity_debug_step_runs_only_by_hand_and_never_prints_the_token():
         and 'echo "$reply"' not in script
         and 'echo "$token"' not in script
     )
+
+
+def test_the_deploy_step_never_hands_the_sam_tool_an_empty_setting():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    )
+    script = next(
+        s for s in workflow["jobs"]["deploy"]["steps"] if s.get("name") == "Deploy"
+    )["run"]
+    # the two settings that always have a value are given a default; the key is added only when it is set
+    assert "${ALLOWED_ORIGINS:-" in script and "${WORKER_CONCURRENCY:-0}" in script
+    assert (
+        'if [ -n "${OTHELLO_API_KEY}" ]; then' in script
+        and 'overrides+=("ApiKey=${OTHELLO_API_KEY}")' in script
+    )
+    first_use = script.index("ApiKey=${OTHELLO_API_KEY}")
+    assert script.rindex("if [ -n", 0, first_use) > script.index(
+        "overrides=("
+    )  # only inside the "if"
+    assert '--parameter-overrides "${overrides[@]}"' in script
