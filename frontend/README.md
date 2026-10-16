@@ -45,3 +45,11 @@ npm run dev
 npm run build
 ```
 The build outputs a single-file distributable to `dist/index.html`.
+
+## AWS deployment
+
+The repository's [`amplify.yml`](../amplify.yml) builds `frontend/dist` for AWS Amplify Hosting. After the SAM API is deployed, set `VITE_OTHELLO_API_URL` in Amplify to the stack's `ApiUrl` output (no trailing slash), then redeploy the frontend. Add the Amplify site's exact HTTPS origin to the API stack's `AllowedOrigins` parameter. For local development, copy `.env.example` to `.env.local` and set the same URL. These are Vite build variables, so changing them requires a new frontend build.
+
+When the API URL is set, uploading a ResPlan JSON with GeoJSON or WKT geometry starts an AWS job, shows its progress, and loads the official result and checker overlay. The built-in examples and other browser-format uploads remain local previews. The **Rerun on AWS** button starts another job for the uploaded ResPlan. The API accepts the schema documented in [`docs/API.md`](../docs/API.md); sample uploads are in `tests/data/uploads/`.
+
+If the API stack uses `ApiKey`, `VITE_OTHELLO_API_KEY` sends it as `x-api-key`. A Vite variable is embedded in public browser JavaScript, so this key must not be treated as secret authentication. See [`docs/DEPLOYMENT.md`](../docs/DEPLOYMENT.md) for the backend deployment and CORS setup.

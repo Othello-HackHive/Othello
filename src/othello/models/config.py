@@ -24,7 +24,7 @@ class SolverConfig(BaseModel):
     max_area_per_hub_m2: float = 100.0
     hub_wall_clearance_m: float = 0.5
     tolerance_m: float = 0.001
-    cable_transit_policy: str = "avoid_if_possible"
+    cable_transit_policy: str = "forbid"
     zone_link_through_excluded: bool = False
     tiebreak_gap_definition: str = "max_minus_min"
     cable_wall_margin_m: float = 0.02
@@ -35,6 +35,7 @@ class SolverConfig(BaseModel):
     time_budget_s: float = 60.0
     final_check_reserve_fraction: float = 0.10
     hub_grid_step_m: float = 0.25
+    min_hub_node_distance_m: float = 0.002
     grid_step_m: float = 0.10
     output_precision_decimals: int = 4
     weights: Weights = Field(default_factory=Weights)

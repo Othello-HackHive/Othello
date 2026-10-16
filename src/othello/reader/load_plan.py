@@ -12,7 +12,7 @@ from itertools import combinations
 from pathlib import Path
 from typing import Any
 
-from shapely import affinity, make_valid
+from shapely import affinity, make_valid, set_precision, union_all
 from shapely.errors import GEOSException
 from shapely.geometry import GeometryCollection, LineString, Point
 from shapely.ops import unary_union
@@ -35,6 +35,16 @@ def _parts(geometry: Any) -> list[Any]:
         return [geometry]
     if hasattr(geometry, "geoms"):
         return [part for child in geometry.geoms for part in _parts(child)]
+    return []
+
+
+def _line_parts(geometry: Any) -> list[LineString]:
+    if geometry is None or geometry.is_empty:
+        return []
+    if geometry.geom_type == "LineString":
+        return [geometry]
+    if hasattr(geometry, "geoms"):
+        return [part for child in geometry.geoms for part in _line_parts(child)]
     return []
 
 
@@ -72,31 +82,39 @@ def _polygonal_layer(geometry: Any, label: str, repairs: list[str], config: Solv
     return _repair(merged, label, repairs, config)
 
 
+def _overlay_polygonal(
+    first: Any,
+    second: Any,
+    operation: str,
+    label: str,
+    repairs: list[str],
+    config: SolverConfig,
+) -> Any:
+    try:
+        result = getattr(first, operation)(second)
+    except GEOSException as error:
+        if not config.repair_geometry:
+            raise InputError(f"Could not {operation} geometry for {label}") from error
+        grid = max(config.tolerance_m / 1000, 1e-8)
+        try:
+            left = set_precision(make_valid(first), grid)
+            right = set_precision(make_valid(second), grid)
+            result = getattr(left, operation)(right)
+        except GEOSException as retry_error:
+            raise InputError(f"Could not {operation} repaired geometry for {label}") from retry_error
+        repairs.append(f"Retried {operation} with micron-scale precision: {label}")
+    return _polygonal_layer(result, label, repairs, config)
+
+
 def _scale_geometry(geometry: Any, scale: float) -> Any:
     return affinity.scale(geometry, xfact=1 / scale, yfact=1 / scale, origin=(0, 0))
 
 
-def _graph_node_id(kind: str, index: int) -> str:
-    return f"{kind}_{index}"
-
-
 def _safe_point(room_m: Any, obstacles_m: Any, clearance_m: float) -> Point:
-    allowed = room_m.difference(obstacles_m.buffer(clearance_m))
+    allowed = room_m.difference(obstacles_m.buffer(clearance_m, quad_segs=64))
     if allowed.is_empty:
         raise InputError("Eligible room has no point with required wall clearance")
     return allowed.representative_point()
-
-
-def _gap_polyline(geometry: Any) -> list[tuple[float, float]]:
-    boundary = getattr(geometry, "boundary", None)
-    if boundary is not None and hasattr(boundary, "geoms"):
-        parts = [part for part in boundary.geoms if part is not None and not part.is_empty]
-        boundary = max(parts, key=lambda item: item.length) if parts else None
-    coordinates = list(boundary.coords) if boundary is not None and hasattr(boundary, "coords") else []
-    if len(coordinates) >= 2:
-        return [(float(coordinates[0][0]), float(coordinates[0][1])), (float(coordinates[1][0]), float(coordinates[1][1]))]
-    centroid = geometry.representative_point()
-    return [(float(centroid.x), float(centroid.y))] * 2
 
 
 def _door_gap_line(
@@ -105,13 +123,11 @@ def _door_gap_line(
     free_space_m: Any,
     tolerance_m: float,
 ) -> tuple[list[str], list[tuple[float, float]]] | None:
-    """Build a short, free-space line through the centre of an internal door.
+    """Build a free-space line across an internal door, in the wall plane.
 
     Raw ResPlan doors are area polygons that overlap the wall layer.  Their
-    boundary is therefore not a traversable doorway.  The short axis of the
-    minimum rotated rectangle is the wall-normal direction, so extend it just
-    past the door on both sides and accept it only when it joins two rooms in
-    true free space.
+    boundary is not the crossing contract.  Probe on both sides of the short
+    (wall-normal) axis to identify the rooms, then emit the long axis.
     """
 
     rectangle = door_m.minimum_rotated_rectangle
@@ -163,8 +179,16 @@ def _door_gap_line(
     return None
 
 
-def _open_passage_gap(room_a: Any, room_b: Any, walls_m: Any, windows_m: Any, wall_depth_m: float) -> Any | None:
-    """Return a substantive wall-free gap between two room polygons, if one exists.
+def _open_passage_gap(
+    room_a: Any,
+    room_b: Any,
+    walls_m: Any,
+    windows_m: Any,
+    free_space_m: Any,
+    wall_depth_m: float,
+    tolerance_m: float,
+) -> LineString | None:
+    """Return a substantive wall-free crossing line between two rooms.
 
     ResPlan's ``adjacency`` graph edges also include rooms separated by an
     ordinary wall, so they are candidates only.  The geometry decides whether
@@ -192,7 +216,82 @@ def _open_passage_gap(room_a: Any, room_b: Any, walls_m: Any, windows_m: Any, wa
         min_x, min_y, max_x, max_y = piece.bounds
         if max(max_x - min_x, max_y - min_y) >= minimum_extent and piece.area >= minimum_area:
             valid_pieces.append(piece)
-    return unary_union(valid_pieces) if valid_pieces else None
+    if not valid_pieces:
+        return None
+
+    def joins_rooms(line: LineString) -> bool:
+        start, end = line.coords[0], line.coords[-1]
+        length = line.length
+        if length == 0:
+            return False
+        normal_x = -(end[1] - start[1]) / length
+        normal_y = (end[0] - start[0]) / length
+        middle = line.interpolate(0.5, normalized=True)
+        for distance in (2 * tolerance_m, 0.01, 0.05, wall_depth_m, 2 * wall_depth_m):
+            probes = [
+                Point(middle.x - normal_x * distance, middle.y - normal_y * distance),
+                Point(middle.x + normal_x * distance, middle.y + normal_y * distance),
+            ]
+            if not all(free_space_m.covers(point) for point in probes):
+                continue
+            if not free_space_m.covers(LineString(probes)):
+                continue
+            if (room_a.covers(probes[0]) and room_b.covers(probes[1])) or (
+                room_b.covers(probes[0]) and room_a.covers(probes[1])
+            ):
+                return True
+        return False
+
+    # Where room polygons touch, their shared boundary is the natural
+    # transverse crossing line.  Select a straight segment of that boundary
+    # that lies in the candidate opening and in true free space.  The old
+    # arbitrary first edge could be millimetres long or cross a wall.
+    shared = room_a.boundary.intersection(room_b.boundary)
+    shared = shared.intersection(unary_union(valid_pieces)).intersection(free_space_m)
+    minimum_length = max(2 * wall_depth_m, 0.1)
+    segments: list[LineString] = []
+    for line in _line_parts(shared):
+        for start, end in zip(line.coords, list(line.coords)[1:]):
+            segment = LineString([start, end])
+            if segment.length >= minimum_length and free_space_m.covers(segment):
+                segments.append(segment)
+    if segments:
+        longest = max(segments, key=lambda segment: segment.length)
+        trim = min(2 * tolerance_m, longest.length / 4)
+        result = LineString([longest.interpolate(trim), longest.interpolate(longest.length - trim)])
+        if free_space_m.covers(result) and joins_rooms(result):
+            return result
+
+    # Non-touching room polygons can still have a narrow wall-free span.
+    # The candidate's longest rectangle axis supplies a transverse line;
+    # reject it if it is too short or not fully in free space.
+    for piece in sorted(valid_pieces, key=lambda item: item.area, reverse=True):
+        rectangle = piece.minimum_rotated_rectangle
+        coordinates = list(rectangle.exterior.coords)
+        edges = [
+            (coordinates[index + 1][0] - coordinates[index][0], coordinates[index + 1][1] - coordinates[index][1])
+            for index in range(len(coordinates) - 1)
+        ]
+        if not edges:
+            continue
+        long_x, long_y = max(edges, key=lambda edge: math.hypot(*edge))
+        length = math.hypot(long_x, long_y)
+        if length < minimum_length:
+            continue
+        long_x /= length
+        long_y /= length
+        centre = piece.centroid
+        for trim in (2 * tolerance_m, 0.005, 0.01, 0.02):
+            reach = length / 2 - trim
+            if reach <= 0:
+                continue
+            result = LineString([
+                (centre.x - long_x * reach, centre.y - long_y * reach),
+                (centre.x + long_x * reach, centre.y + long_y * reach),
+            ])
+            if free_space_m.covers(result) and joins_rooms(result):
+                return result
+    return None
 
 
 def _free_space(inner_m: Any, walls_m: Any, windows_m: Any, repairs: list[str]) -> Any:
@@ -235,11 +334,32 @@ def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig |
         raise InputError("Computed scale is not positive")
 
     geometries_units: dict[str, Any] = {}
+    room_parts_units: dict[str, list[Any]] = {}
+    door_parts_units: list[Any] = []
     for kind in (*ELIGIBLE_KINDS, *EXCLUDED_KINDS, "wall", "window", "door", "front_door"):
         geometry = record.get(kind)
         if geometry is not None:
-            geometries_units[kind] = _polygonal_layer(geometry, kind, repairs, config)
-    inner_m = _scale_geometry(inner_units, scale)
+            if kind in (*ELIGIBLE_KINDS, *EXCLUDED_KINDS):
+                # Each source component represents a room.  Unioning adjacent
+                # same-kind components would silently remove a room and node.
+                room_parts_units[kind] = [
+                    _polygonal_layer(part, f"{kind}_{index}", repairs, config)
+                    for index, part in enumerate(_parts(geometry))
+                ]
+            elif kind == "door":
+                if not geometry.is_valid and not config.repair_geometry:
+                    raise InputError("Invalid geometry for door")
+                # Door polygons may overlap at a corner.  Their union is right
+                # for cutting wall voids, but it can turn two separate doors
+                # into one L-shaped opening with the wrong orientation.
+                for index, raw_part in enumerate(_parts(geometry), start=1):
+                    repaired_part = _polygonal_layer(raw_part, f"door_{index}", repairs, config)
+                    door_parts_units.extend(_parts(repaired_part))
+                geometries_units[kind] = unary_union(door_parts_units) if door_parts_units else GeometryCollection()
+            else:
+                geometries_units[kind] = _polygonal_layer(geometry, kind, repairs, config)
+    room_precision_m = max(config.tolerance_m / 1000, 1e-8)
+    inner_m = set_precision(_scale_geometry(inner_units, scale), room_precision_m)
     walls_m = _scale_geometry(geometries_units.get("wall", GeometryCollection()), scale)
     windows_m = _scale_geometry(geometries_units.get("window", GeometryCollection()), scale)
     door_voids_m = unary_union(
@@ -249,7 +369,9 @@ def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig |
         ]
     )
     if not door_voids_m.is_empty:
-        walls_m = walls_m.difference(door_voids_m)
+        walls_m = _overlay_polygonal(
+            walls_m, door_voids_m, "difference", "wall after door voids", repairs, config,
+        )
         # Boolean subtraction can make an otherwise valid wall layer invalid
         # when raw door rectangles touch or overlap.  Part 3 deliberately
         # refuses invalid geometry, so normalise the resulting obstacle layer
@@ -258,33 +380,69 @@ def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig |
     routing_obstacles_m = unary_union([walls_m, windows_m])
     free_space_m = _free_space(inner_m, walls_m, windows_m, repairs)
 
-    rooms: dict[str, Room] = {}
-    claimed_room_area_m = GeometryCollection()
-    room_index = 1
+    # Give a smaller enclosed room its own area before subtracting overlaps
+    # from a broad living-room polygon.  Keep public IDs in source order.
+    room_candidates: list[tuple[str, int, Any, Any]] = []
     for kind in (*ELIGIBLE_KINDS, *EXCLUDED_KINDS):
-        for index, polygon_units in enumerate(_parts(geometries_units.get(kind))):
-            polygon_m = _scale_geometry(polygon_units, scale).intersection(inner_m)
-            polygon_m = _repair(polygon_m, f"{kind}_{index}", repairs, config)
-            polygon_m = polygon_m.difference(claimed_room_area_m)
-            polygon_m = _repair(polygon_m, f"{kind}_{index}_disjoint", repairs, config)
-            if polygon_m.is_empty or not _parts(polygon_m):
-                repairs.append(f"Dropped room with no disjoint interior: {kind}_{index}")
-                continue
-            room_id = f"R{room_index:02d}"
-            room_index += 1
-            rooms[room_id] = Room(
-                room_id=room_id,
-                kind=kind,
-                eligible=kind in ELIGIBLE_KINDS,
-                polygon_m=polygon_m,
-                polygon_units=polygon_units,
-                area_m2=float(polygon_m.area),
-                # ResPlan occasionally overlays exterior labels over the
-                # drawing interior.  Those labels are never transit rooms in
-                # the challenge, even when their clipped geometry has area.
-                inside_inner=kind not in EXTERIOR_KINDS and inner_m.covers(polygon_m),
+        for index, polygon_units in enumerate(room_parts_units.get(kind, [])):
+            polygon_m = set_precision(
+                _overlay_polygonal(
+                    _scale_geometry(polygon_units, scale), inner_m, "intersection",
+                    f"{kind}_{index}_interior", repairs, config,
+                ),
+                room_precision_m,
             )
-            claimed_room_area_m = unary_union([claimed_room_area_m, polygon_m])
+            room_candidates.append((kind, index, polygon_units, polygon_m))
+
+    claimed_room_area_m = GeometryCollection()
+    owned_polygons: dict[tuple[str, int], Any] = {}
+    for kind, index, _, polygon_m in sorted(
+        room_candidates,
+        key=lambda item: (item[0] in EXTERIOR_KINDS, item[3].area, (*ELIGIBLE_KINDS, *EXCLUDED_KINDS).index(item[0]), item[1]),
+    ):
+        if polygon_m.is_empty:
+            owned_polygons[kind, index] = polygon_m
+            continue
+        owned = set_precision(
+            _overlay_polygonal(
+                polygon_m, claimed_room_area_m, "difference", f"{kind}_{index}_disjoint", repairs, config,
+            ),
+            room_precision_m,
+        )
+        owned_polygons[kind, index] = owned
+        if not owned.is_empty:
+            try:
+                claimed_room_area_m = union_all([claimed_room_area_m, owned], grid_size=room_precision_m)
+            except GEOSException:
+                grid = max(config.tolerance_m / 1000, 1e-8)
+                claimed_room_area_m = union_all([claimed_room_area_m, owned], grid_size=grid)
+                repairs.append(f"Retried room union with micron-scale precision: {kind}_{index}")
+            claimed_room_area_m = _polygonal_layer(
+                claimed_room_area_m, f"claimed after {kind}_{index}", repairs, config,
+            )
+
+    rooms: dict[str, Room] = {}
+    room_index = 1
+    for kind, index, polygon_units, _ in room_candidates:
+        # A common micron-scale precision model removes zero-area overlay
+        # slivers that GEOS can otherwise report as a positive room overlap.
+        polygon_m = owned_polygons[kind, index]
+        if polygon_m.is_empty or not _parts(polygon_m):
+            repairs.append(f"Dropped room with no disjoint interior: {kind}_{index}")
+            continue
+        room_id = f"R{room_index:02d}"
+        room_index += 1
+        rooms[room_id] = Room(
+            room_id=room_id,
+            kind=kind,
+            eligible=kind in ELIGIBLE_KINDS,
+            polygon_m=polygon_m,
+            polygon_units=polygon_units,
+            area_m2=float(polygon_m.area),
+            # Exterior labels never become transit rooms.  Every other source
+            # room has already been clipped to the inner boundary.
+            inside_inner=kind not in EXTERIOR_KINDS,
+        )
 
     nodes: dict[str, Node] = {}
     hub_zones_m: dict[str, Any] = {}
@@ -298,10 +456,29 @@ def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig |
         # Intersecting free space also guards against malformed development
         # records whose room polygon reaches beyond the inner boundary.
         # Shapely approximates circular buffer corners with line segments.
-        # Add the geometry tolerance so even an inscribed buffer edge stays at
-        # least the required 0.5 m from the true wall/window geometry.
+        # Use fine arcs plus the geometry tolerance so even an inscribed edge
+        # stays at least the required 0.5 m from the true obstacle geometry.
         hub_clearance_buffer_m = config.hub_wall_clearance_m + config.tolerance_m
-        hub_zone = eligible_interior_m.difference(routing_obstacles_m.buffer(hub_clearance_buffer_m))
+        hub_zone = eligible_interior_m.difference(
+            routing_obstacles_m.buffer(hub_clearance_buffer_m, quad_segs=64)
+        )
+        # Overlay operations can leave a zero-area boundary sliver outside
+        # the source room/free space.  Inset only when strict containment
+        # fails, in tiny steps far below the rule tolerance.
+        for _ in range(8):
+            if hub_zone.is_empty or (
+                room.polygon_m.covers(hub_zone)
+                and inner_m.covers(hub_zone)
+                and free_space_m.covers(hub_zone)
+            ):
+                break
+            hub_zone = hub_zone.buffer(-config.tolerance_m / 1000)
+        if not hub_zone.is_empty and not (
+            room.polygon_m.covers(hub_zone)
+            and inner_m.covers(hub_zone)
+            and free_space_m.covers(hub_zone)
+        ):
+            raise InputError(f"Could not confine hub zone to free interior for {room.room_id}")
         hub_zones_m[room.room_id] = hub_zone
         try:
             point_m = _safe_point(eligible_interior_m, routing_obstacles_m, config.hub_wall_clearance_m)
@@ -309,7 +486,10 @@ def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig |
             # A node is fixed input in the competition.  This fallback exists
             # only for ResPlan development records that lack node points; an
             # empty hub zone remains visible to territory generation.
-            point_m = room.polygon_m.representative_point()
+            point_m = (
+                eligible_interior_m.representative_point()
+                if not eligible_interior_m.is_empty else room.polygon_m.representative_point()
+            )
             repairs.append(f"Development node for {room.room_id} is below hub-clearance distance")
         point_units = affinity.scale(point_m, xfact=scale, yfact=scale, origin=(0, 0))
         node_id = f"N{len(nodes) + 1}"
@@ -325,7 +505,7 @@ def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig |
 
     wall_depth_m = float(record.get("wall_depth", 0.0)) / scale
     openings: dict[str, Opening] = {}
-    for index, door_units in enumerate(_parts(geometries_units.get("door")), start=1):
+    for index, door_units in enumerate(door_parts_units, start=1):
         door_m = _scale_geometry(door_units, scale)
         door_gap = _door_gap_line(door_m, rooms, free_space_m, config.tolerance_m)
         if door_gap is None:
@@ -335,6 +515,24 @@ def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig |
         if not all(rooms[room_id].inside_inner for room_id in door_rooms):
             repairs.append(f"Dropped door D{index}: connection includes a non-interior room")
             continue
+        new_gap = LineString(gap_polyline_m)
+        conflicts = [
+            opening_id for opening_id, opening in openings.items()
+            if opening.kind == "door" and (
+                new_gap.intersection(LineString(opening.gap_polyline_m)).length > 0
+                or new_gap.crosses(LineString(opening.gap_polyline_m))
+            )
+        ]
+        if conflicts:
+            if any(set(openings[opening_id].rooms) != set(door_rooms) for opening_id in conflicts):
+                repairs.append(f"Dropped door D{index}: ambiguous overlap with another room pair")
+                continue
+            if any(LineString(openings[opening_id].gap_polyline_m).length >= new_gap.length for opening_id in conflicts):
+                repairs.append(f"Dropped door D{index}: duplicate crossing contract")
+                continue
+            for opening_id in conflicts:
+                del openings[opening_id]
+                repairs.append(f"Dropped door {opening_id}: replaced by longer duplicate D{index}")
         openings[f"D{index}"] = Opening(
             opening_id=f"D{index}",
             kind="door",
@@ -358,14 +556,19 @@ def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig |
             rooms[target_room].polygon_m,
             walls_m,
             windows_m,
+            free_space_m,
             wall_depth_m,
+            config.tolerance_m,
         )
         if gap is None:
             continue
-        gap_polyline_m = _gap_polyline(gap)
-        gap_line = LineString(gap_polyline_m)
-        if not free_space_m.covers(gap_line) or gap_line.intersection(routing_obstacles_m).length > 0:
-            repairs.append(f"Dropped inferred passage P: no unambiguous free-space gap")
+        gap_polyline_m = [(float(x), float(y)) for x, y in gap.coords]
+        if any(
+            gap.intersection(LineString(opening.gap_polyline_m)).length > 0
+            or gap.crosses(LineString(opening.gap_polyline_m))
+            for opening in openings.values()
+        ):
+            repairs.append(f"Dropped inferred passage {source_room}-{target_room}: intersects another opening")
             continue
         opening_id = f"P{sum(opening.kind == 'open_passage' for opening in openings.values()) + 1}"
         openings[opening_id] = Opening(

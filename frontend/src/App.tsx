@@ -34,6 +34,8 @@ import TwinScene, { type CameraPresetId, type Inspection } from "./components/Tw
 import { normalizePlan, PRESET_IDS, PRESET_JSON, type PlanModel } from "./lib/resplan";
 import { optimize, type Solution } from "./lib/optimizer";
 import { parseOverlay, solutionFromOfficial, type OverlayDraw } from "./lib/overlay";
+import { cloudAvailable, isCloudPlan, solveCloudPlan, type CloudEvent } from "./lib/cloudApi";
+import { viewerPlanFromCloud } from "./lib/cloudPlan";
 
 const phases = ["IMPORT", "ZONES", "ROUTE", "AUDIT"];
 
@@ -67,6 +69,8 @@ const backendStages = [
 ];
 
 type RunState = "ready" | "solving" | "verified";
+type CloudState = { status: string; jobId?: string; events: CloudEvent[]; error?: string };
+type CloudPayload = { raw: Record<string, unknown>; viewer: Record<string, unknown>; settings: Record<string, unknown> | null; key: string };
 
 export default function App() {
   const [planKey, setPlanKey] = useState<string>("BENCHMARK_6R");
@@ -99,6 +103,9 @@ export default function App() {
   const [dragging, setDragging] = useState(false);
   const [official, setOfficial] = useState<{ text: string; data: Record<string, unknown>; name: string } | null>(null);
   const [overlayDraw, setOverlayDraw] = useState<OverlayDraw | null>(null);
+  const [cloudState, setCloudState] = useState<CloudState | null>(null);
+  const cloudControllerRef = useRef<AbortController | null>(null);
+  const cloudPayloadRef = useRef<CloudPayload | null>(null);
   const [resultDismissed, setResultDismissed] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const resultInput = useRef<HTMLInputElement>(null);
@@ -166,7 +173,13 @@ export default function App() {
     };
   }, [modelView]);
 
+  useEffect(() => () => cloudControllerRef.current?.abort(), []);
+
   const loadPlan = useCallback((key: string, json: Record<string, unknown>, label: string) => {
+    cloudControllerRef.current?.abort();
+    cloudControllerRef.current = null;
+    cloudPayloadRef.current = null;
+    setCloudState(null);
     setPlanKey(key);
     setRawPlan(json);
     setPlanLabel(label);
@@ -177,7 +190,56 @@ export default function App() {
     setRunState("solving");
   }, []);
 
+  const startCloud = async (payload: CloudPayload) => {
+    cloudControllerRef.current?.abort();
+    const controller = new AbortController();
+    cloudControllerRef.current = controller;
+    cloudPayloadRef.current = payload;
+    setOfficial(null);
+    setOverlayDraw(null);
+    setResultDismissed(false);
+    setRunState("ready");
+    setCloudState({ status: "queued", events: [] });
+    try {
+      const result = await solveCloudPlan(payload.raw, payload.settings, controller.signal, (progress) => {
+        if (controller.signal.aborted) return;
+        setCloudState((current) => ({
+          status: progress.status,
+          jobId: progress.jobId,
+          events: [...(current?.events ?? []), ...progress.events],
+        }));
+      });
+      if (controller.signal.aborted) return;
+      const viewer = normalizePlan(payload.viewer, payload.key).plan;
+      const draw = parseOverlay(result.overlay, viewer);
+      setOverlayDraw(draw);
+      setOfficial({ text: result.officialText, data: result.official, name: `${payload.key}.json` });
+      setWarnings((current) => [...current, ...draw.warnings]);
+      setCloudState((current) => ({ status: "succeeded", jobId: result.jobId, events: current?.events ?? [] }));
+      setRunState("verified");
+      setOptimizeSignal((value) => value + 1);
+      setPlanError(null);
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setCloudState((current) => ({
+          status: "failed",
+          jobId: current?.jobId,
+          events: current?.events ?? [],
+          error: error instanceof TypeError
+            ? "Could not reach the AWS API. Check VITE_OTHELLO_API_URL and the API's AllowedOrigins setting."
+            : error instanceof Error ? error.message : "Could not run the cloud solver",
+        }));
+      }
+    } finally {
+      if (cloudControllerRef.current === controller) cloudControllerRef.current = null;
+    }
+  };
+
   const runSolver = () => {
+    if (cloudAvailable && cloudPayloadRef.current) {
+      void startCloud(cloudPayloadRef.current);
+      return;
+    }
     setSelected(null);
     setResultDismissed(true);
     setRunState("solving");
@@ -193,6 +255,8 @@ export default function App() {
 
   const loadOfficial = async (file: File) => {
     try {
+      cloudControllerRef.current?.abort();
+      setCloudState(null);
       const text = await file.text();
       const data = JSON.parse(text) as Record<string, unknown>;
       const target = requirePlan();
@@ -210,6 +274,8 @@ export default function App() {
 
   const loadOverlayFile = async (file: File) => {
     try {
+      cloudControllerRef.current?.abort();
+      setCloudState(null);
       const data = JSON.parse(await file.text()) as Record<string, unknown>;
       const target = requirePlan();
       if (!target) return;
@@ -225,6 +291,8 @@ export default function App() {
   };
 
   const clearResult = () => {
+    cloudControllerRef.current?.abort();
+    setCloudState(null);
     setOfficial(null);
     setOverlayDraw(null);
     setResultDismissed(true);
@@ -232,8 +300,20 @@ export default function App() {
 
   const ingestFile = async (file: File) => {
     try {
-      const json = JSON.parse(await file.text());
-      loadPlan(file.name.replace(/\.json$/i, "").toUpperCase().slice(0, 16), json, file.name);
+      const json = JSON.parse(await file.text()) as Record<string, unknown>;
+      if (!json || typeof json !== "object" || Array.isArray(json)) throw new Error("expected a JSON object");
+      const wrapped = json.plan && typeof json.plan === "object" && !Array.isArray(json.plan);
+      const raw = wrapped ? json.plan as Record<string, unknown> : json;
+      const settings = wrapped && json.settings && typeof json.settings === "object" && !Array.isArray(json.settings)
+        ? json.settings as Record<string, unknown> : null;
+      const viewer = isCloudPlan(raw) ? viewerPlanFromCloud(raw) : raw;
+      const key = file.name.replace(/\.json$/i, "").toUpperCase().slice(0, 16);
+      loadPlan(key, viewer, file.name);
+      if (cloudAvailable && isCloudPlan(raw)) {
+        void startCloud({ raw, viewer, settings, key });
+      } else if (cloudAvailable) {
+        setCloudState({ status: "preview", events: [], error: "This file uses the browser preview format. The AWS solver accepts ResPlan GeoJSON or WKT plans." });
+      }
     } catch (error) {
       setPlanError(error instanceof Error ? `Invalid JSON — ${error.message}` : "Invalid JSON file");
     }
@@ -267,6 +347,7 @@ export default function App() {
   const hasFailures = knownChecks.some((check) => !check.pass);
   const minimumProof = isBackend && overlayDraw?.provenMinimum === true;
   const displayedStages = isBackend ? backendStages : solverStages;
+  const cloudRunning = cloudState?.status === "queued" || cloudState?.status === "running";
   const scaleSource = rawPlan.m_per_unit != null || rawPlan.metres_per_unit != null || rawPlan.meters_per_unit != null
     ? "declared metres per unit"
     : rawPlan.scale != null || rawPlan.units_per_metre != null
@@ -279,7 +360,13 @@ export default function App() {
   const lowerByNodes = plan ? Math.ceil(plan.eligibleRooms.length / 5) : 0;
   const lowerByArea = plan ? Math.ceil(plan.eligibleAreaM2 / 100) : 0;
   const badgeLabel =
-    runState === "solving"
+    cloudRunning
+      ? `AWS ${cloudState?.status.toUpperCase()}`
+      : cloudState?.status === "failed"
+        ? "AWS ERROR"
+        : cloudState?.status === "succeeded"
+          ? "AWS CHECKED"
+          : runState === "solving"
       ? "REPLAYING"
       : isBackend
         ? hasFailures
@@ -426,12 +513,19 @@ export default function App() {
               }}
             />
             <div className="hero-actions">
-              <button type="button" className="primary-action" onClick={runSolver} disabled={runState === "solving" || !plan}>
-                {runState === "solving" ? <LoaderCircle size={16} className="spin" /> : <Play size={15} fill="currentColor" />}
-                {runState === "solving" ? "REPLAYING…" : "REPLAY SOLUTION STEPS"}
+              <button type="button" className="primary-action" onClick={runSolver} disabled={runState === "solving" || cloudRunning || !plan}>
+                {runState === "solving" || cloudRunning ? <LoaderCircle size={16} className="spin" /> : <Play size={15} fill="currentColor" />}
+                {cloudRunning ? "SOLVING ON AWS…" : cloudPayloadRef.current && cloudAvailable ? "RERUN ON AWS" : runState === "solving" ? "REPLAYING…" : "REPLAY SOLUTION STEPS"}
               </button>
               <a href="#territories" className="scroll-action">SEE HOW IT WAS DERIVED <ChevronDown size={16} /></a>
             </div>
+            {cloudState && (
+              <p className={cloudState.status === "failed" ? "cloud-message cloud-error" : "cloud-message"} role="status">
+                {cloudState.status === "succeeded"
+                  ? "AWS solution and checker overlay loaded."
+                  : cloudState.error ?? cloudState.events.at(-1)?.message ?? "Submitting plan to the AWS solver…"}
+              </p>
+            )}
             {planError && (
               <p className="error-note"><TriangleAlert size={13} /> {planError}</p>
             )}
@@ -575,7 +669,7 @@ export default function App() {
               className={
                 runState === "solving"
                   ? "validation-badge solving"
-                  : hasFailures
+                  : hasFailures || cloudState?.status === "failed"
                     ? "validation-badge fail"
                     : feasible || isBackend
                       ? "validation-badge"
@@ -591,7 +685,13 @@ export default function App() {
           </div>
         </div>
         <div className="source-line">
-          {isBackend ? (overlayDraw?.metrics ? "Score and checks from the backend overlay" : "Load the matching overlay for the full score and checks") : "Browser estimate · load an overlay for independent checks"}
+          {cloudRunning
+            ? `AWS solver ${cloudState?.status} · ${cloudState?.events.at(-1)?.message ?? "waiting for progress"}`
+            : cloudState?.status === "failed"
+              ? `AWS solver error · ${cloudState.error}`
+              : isBackend
+                ? (overlayDraw?.metrics ? "Score and checks from the backend overlay" : "Load the matching overlay for the full score and checks")
+                : "Browser estimate · load an overlay for independent checks"}
         </div>
 
         <div className="cost-card">
@@ -626,7 +726,9 @@ export default function App() {
             <ChevronDown size={15} />
           </summary>
           <ol className="stage-log">
-            {displayedStages.map((label) => <li key={label}>{label}</li>)}
+            {cloudState?.events.length
+              ? cloudState.events.map((event, index) => <li key={`${index}-${event.stage}`}>{event.stage}: {event.message}</li>)
+              : displayedStages.map((label) => <li key={label}>{label}</li>)}
           </ol>
         </details>
 

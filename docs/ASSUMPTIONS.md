@@ -37,7 +37,7 @@ When a **[PENDING]** item is answered, update its row here first, then the TRD, 
 
 | ID | Assumption | Default | Risk if wrong | Config key |
 |---|---|---|---|---|
-| A1 | Cable passage through excluded interior rooms | `avoid_if_possible`: use an excluded interior room only if no other route exists | If allowed and we avoid: slightly longer cable. If forbidden and we use: plan invalid (zero) | `cable_transit_policy` (forbid, avoid_if_possible, allow) |
+| A1 | Cable passage through excluded interior rooms | `forbid` until the organiser answers P3 | If allowed, this may leave some plans without a design; using an excluded room when forbidden would invalidate a submission | `cable_transit_policy` (forbid, avoid_if_possible, allow) |
 | A2 | Zone links count only between assigned eligible rooms (no linking through an excluded room) | direct links only | May use more hubs than necessary | `zone_link_through_excluded` (false) |
 | A3 | Tie-break "assigned-area gap" definition | max hub area minus min hub area | Only matters on exact ties | `tiebreak_gap_definition` |
 | A4 | Cable clearance from wall and window edges in the search | 0.02 m margin (the checker itself uses only the 1 mm tolerance) | Too large: narrow doors lost. Too small: touches fail the checker | `cable_wall_margin_m` |
@@ -51,6 +51,7 @@ When a **[PENDING]** item is answered, update its row here first, then the TRD, 
 | A12 | Time budget per plan | 60 s default, configurable | Organiser limit unknown | `time_budget_s` |
 | A13 | Search caps (hub candidates, orders kept, route library size, beam width) | see TRD section 6 | Quality vs speed | `limits.*` |
 | A14 | A plan with one eligible room over 100 m² cannot be solved; return a structured failure | structured failure, not invented JSON | none | none |
+| A15 | Avoid a hub exactly on an assigned node until zero-length official legs are confirmed | minimum 0.002 m hub-to-node distance | A very narrow hub zone may have no conservative candidate | `min_hub_node_distance_m` (0 disables) |
 
 ## 3. Pending (need organiser input or files)
 
@@ -69,6 +70,7 @@ When a **[PENDING]** item is answered, update its row here first, then the TRD, 
 | P11 | Who repairs invalid polygons, the organiser JSON or us? (A11) | Reader | Part 1 |
 | P12 | Are the weights 1/5/1/0.5 final? | Config values | none (configurable) |
 | P13 | Is the parallel-lane trick (offsetting out and back runs) accepted? Slides 5 and 7 suggest yes. | Lower O | Later experiment |
+| P14 | Are a hub and node allowed at exactly the same point, and are duplicate-point zero-length leg polylines accepted? | A15 and official output validity | Part 3 |
 
 ## 4. Organiser questions (copy and send)
 
@@ -80,3 +82,4 @@ When a **[PENDING]** item is answered, update its row here first, then the TRD, 
 6. How are crossings counted when a cable endpoint touches the middle of another cable, and when two cables overlap?
 7. Is there a runtime limit per plan?
 8. Is the double run in and out of a single-door room on two different parallel lines accepted?
+9. Can a hub coincide exactly with a fixed node, and does the official checker accept a zero-length leg encoded with two identical points?

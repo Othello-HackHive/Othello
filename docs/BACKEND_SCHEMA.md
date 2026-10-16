@@ -103,6 +103,8 @@ class FloorPlan(BaseModel):
 
 Derived helpers on `FloorPlan`: `eligible_rooms()`, `total_eligible_area_m2()`, `hub_lower_bound()`.
 
+For ResPlan development records, each source room and door component stays separate during normalization. Rooms are clipped to `inner`; smaller interior rooms own any area they share with a larger room, so an enclosed storage room or bathroom is not erased by a broad living-room polygon. A retained non-exterior room is an interior room. An inferred open passage is emitted only when a continuous crossing between its two rooms is covered by true free space. ResPlan has no fixed node coordinates, so the adapter generates temporary points and records when a source room cannot meet node clearance; organiser-provided fixed nodes will replace these points.
+
 ## 4. SolverConfig
 
 All settings, with their default and status. Nothing here is a hidden constant elsewhere in the code.
@@ -130,7 +132,7 @@ class SolverConfig(BaseModel):
     tolerance_m: float = 0.001
     weights: Weights = Weights()
     # policies [ASSUMED / PENDING]
-    cable_transit_policy: str = "avoid_if_possible"   # forbid | avoid_if_possible | allow   (A1, P3)
+    cable_transit_policy: str = "forbid"              # forbid | avoid_if_possible | allow   (A1, P3)
     zone_link_through_excluded: bool = False          # (A2, P4)
     tiebreak_gap_definition: str = "max_minus_min"    # (A3, P9)
     cable_wall_margin_m: float = 0.02                 # (A4)
@@ -142,6 +144,7 @@ class SolverConfig(BaseModel):
     time_budget_s: float = 60.0                       # (A12, P10)
     final_check_reserve_fraction: float = 0.10
     hub_grid_step_m: float = 0.25
+    min_hub_node_distance_m: float = 0.002             # 0 permits coincidence (A15, P14)
     grid_step_m: float = 0.10
     output_precision_decimals: int = 4
     limits: Limits = Limits()

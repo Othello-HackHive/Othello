@@ -358,6 +358,11 @@ def _solve_and_write(
 
     budget = config.time_budget_s
     search_deadline = started + budget * (1.0 - config.final_check_reserve_fraction)
+    if budget * (1.0 - config.final_check_reserve_fraction) <= time.get_clock_info("monotonic").resolution:
+        raise NoDesignFoundError(
+            "time budget is below the monotonic clock resolution",
+            notes=["time budget used up in setup"],
+        )
     batches = _partition_batches(
         plan, lower_bound, config, search_deadline, partitioner
     )

@@ -17,6 +17,7 @@ import time
 from typing import Any
 
 import networkx as nx
+from shapely import prepare
 from shapely.geometry import LineString, Point
 from shapely.geometry.base import BaseGeometry
 
@@ -53,6 +54,8 @@ class _Geometry:
     free: BaseGeometry
     obstacles: tuple[BaseGeometry, ...]
     rooms: dict[str, BaseGeometry]
+    room_bounds: dict[str, tuple[float, float, float, float]]
+    room_boundaries: dict[str, BaseGeometry]
     excluded: tuple[BaseGeometry, ...]
     openings: tuple[_Opening, ...]
     opening_lines: tuple[LineString, ...]
@@ -130,8 +133,17 @@ def _read_geometry(plan: Any, budget: _Budget) -> _Geometry:
             if gap.intersection(other.gap).length > 0 or gap.crosses(other.gap):
                 raise _UnsupportedGeometry(f"Ambiguous intersecting openings: {other.opening_id}, {opening_id}")
         openings.append(_Opening(opening_id, pair, gap))
-    return _Geometry(plan.inner_m, plan.free_space_m, obstacles, rooms, tuple(excluded),
-                     tuple(openings), tuple(opening_lines))
+    boundaries = {room_id: polygon.boundary for room_id, polygon in rooms.items()}
+    # A single grid probes the same polygons and boundaries thousands of
+    # times. GEOS prepared predicates retain exact semantics and avoid
+    # rebuilding their spatial index for each candidate point and edge.
+    for shape in (plan.inner_m, plan.free_space_m, *obstacles, *rooms.values(),
+                  *boundaries.values(), *excluded, *opening_lines):
+        budget.check("geometry preparation")
+        prepare(shape)
+    return _Geometry(plan.inner_m, plan.free_space_m, obstacles, rooms,
+                     {room_id: polygon.bounds for room_id, polygon in rooms.items()},
+                     boundaries, tuple(excluded), tuple(openings), tuple(opening_lines))
 
 
 def _coordinates(geom: BaseGeometry):
@@ -189,11 +201,19 @@ def _augment_lines(xs, ys, bounds, step, budget):
     return xs, ys
 
 
-def _owner(point: Point, rooms) -> str | None:
-    owners = [room_id for room_id, polygon in rooms.items() if polygon.contains(point)]
+def _bounds_overlap(a, b) -> bool:
+    return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
+
+
+def _owner(point: Point, geometry: _Geometry) -> str | None:
+    x, y = point.x, point.y
+    relevant = [(room_id, polygon) for room_id, polygon in geometry.rooms.items()
+                if (bounds := geometry.room_bounds[room_id])[0] <= x <= bounds[2]
+                and bounds[1] <= y <= bounds[3]]
+    owners = [room_id for room_id, polygon in relevant if polygon.contains(point)]
     if len(owners) > 1:
         raise _UnsupportedGeometry(f"Ambiguous room ownership at {point.wkt}")
-    if any(polygon.boundary.intersects(point) for polygon in rooms.values()):
+    if any(geometry.room_boundaries[room_id].intersects(point) for room_id, _ in relevant):
         return None
     return owners[0] if owners else None
 
@@ -249,9 +269,12 @@ def _edge_openings(segment, geometry, tolerance, budget):
     spans are accepted only with a matching transverse opening crossing.
     """
     cuts = {0.0, segment.length}
-    for polygon in geometry.rooms.values():
+    segment_bounds = segment.bounds
+    for room_id, polygon in geometry.rooms.items():
         budget.check("edge validation")
-        intersection = segment.intersection(polygon.boundary)
+        if not _bounds_overlap(segment_bounds, geometry.room_bounds[room_id]):
+            continue
+        intersection = segment.intersection(geometry.room_boundaries[room_id])
         if intersection.length > 0:
             return None  # Do not run along a room boundary.
         cuts.update(segment.project(Point(p)) for p in _coordinates(intersection))
@@ -259,7 +282,7 @@ def _edge_openings(segment, geometry, tolerance, budget):
     cuts = sorted(cuts)
     for left, right in zip(cuts, cuts[1:]):
         budget.check("edge validation")
-        owner = _owner(segment.interpolate((left + right) / 2), geometry.rooms)
+        owner = _owner(segment.interpolate((left + right) / 2), geometry)
         if intervals and intervals[-1][2] == owner:
             intervals[-1] = (intervals[-1][0], right, owner)
         else:
@@ -330,7 +353,7 @@ def _portal_pairs(vertices, geometry, tolerance, budget):
             at = coord[axis]
             events = [at]
             for room_id in sorted(opening.rooms):
-                boundary = scan.intersection(geometry.rooms[room_id].boundary)
+                boundary = scan.intersection(geometry.room_boundaries[room_id])
                 events.extend(p[axis] for p in _coordinates(boundary) if abs(p[axis] - at) <= tolerance)
             left = bisect_left(positions, min(events)) - 1
             right = bisect_right(positions, max(events))
@@ -341,13 +364,15 @@ def _portal_pairs(vertices, geometry, tolerance, budget):
 def _build_graph(xs, ys, geometry, terminals, config, transit_mode, budget):
     graph = nx.DiGraph()
     rows, columns = {}, {}
+    vertex_owners: dict[Coord, str] = {}
     # Include every terminal, even if search clearance isolates it.
     graph.add_nodes_from(terminals.values())
     for x in sorted(xs):
         for y in sorted(ys):
             budget.check("candidate enumeration")
             point = Point(x, y)
-            if _owner(point, geometry.rooms) is None:
+            owner = _owner(point, geometry)
+            if owner is None:
                 continue
             if any(opening.gap.intersects(point) for opening in geometry.openings):
                 continue
@@ -355,6 +380,7 @@ def _build_graph(xs, ys, geometry, terminals, config, transit_mode, budget):
                 continue
             vertex = (x, y)
             graph.add_node(vertex)
+            vertex_owners[vertex] = owner
             rows.setdefault(y, []).append(vertex)
             columns.setdefault(x, []).append(vertex)
 
@@ -365,7 +391,15 @@ def _build_graph(xs, ys, geometry, terminals, config, transit_mode, budget):
         segment = LineString((start, end))
         if not _spatially_allowed(segment, geometry, config.cable_wall_margin_m, transit_mode):
             return
-        opening_ids = _edge_openings(segment, geometry, config.tolerance_m, budget)
+        owner = vertex_owners.get(start)
+        if (owner is not None and owner == vertex_owners.get(end)
+                and geometry.rooms[owner].contains_properly(segment)):
+            # Strict interior containment proves there is no room transition,
+            # including on long portal-spanning edges. All obstacle, clearance,
+            # free-space and transit checks above still apply.
+            opening_ids = ()
+        else:
+            opening_ids = _edge_openings(segment, geometry, config.tolerance_m, budget)
         if opening_ids is None:
             return
         graph.add_edge(start, end, length_m=segment.length, direction=forward, opening_ids=opening_ids)
@@ -398,7 +432,7 @@ def _connected(graph, start, goal, budget):
 
 
 def build_routing_graph(plan, terminals: Mapping[str, Coord], start_id: str, goal_id: str,
-                        config, deadline: float | None = None) -> GraphBuildResult:
+                        config, deadline: float | None = None, stage_sink=None) -> GraphBuildResult:
     """Build/select a graph for one leg, without A* or route scoring.
 
     ``avoid_if_possible`` relaxes only after completed restricted Hanan AND
@@ -413,6 +447,7 @@ def build_routing_graph(plan, terminals: Mapping[str, Coord], start_id: str, goa
     fallback = False
     budget = _Budget(deadline)
     terminal_vertices = {}
+    geometry_validated = False
     try:
         if deadline is not None and (not isinstance(deadline, Real) or not isfinite(deadline)):
             raise ValueError("deadline must be a finite absolute monotonic timestamp")
@@ -431,10 +466,11 @@ def build_routing_graph(plan, terminals: Mapping[str, Coord], start_id: str, goa
         if start_id not in terminal_vertices or goal_id not in terminal_vertices:
             raise ValueError("start_id and goal_id must identify supplied terminals")
         geometry = _read_geometry(plan, budget)
+        geometry_validated = True
         for terminal_id, coord in terminal_vertices.items():
             budget.check("terminal validation")
             point = Point(coord)
-            if _owner(point, geometry.rooms) is None:
+            if _owner(point, geometry) is None:
                 raise _UnsupportedGeometry(f"Terminal {terminal_id} has unlabelled or boundary room ownership")
             if any(opening.gap.intersects(point) for opening in geometry.openings):
                 raise _UnsupportedGeometry(f"Terminal {terminal_id} lies on an opening gap")
@@ -450,7 +486,9 @@ def build_routing_graph(plan, terminals: Mapping[str, Coord], start_id: str, goa
                 if fallback and augmented is None:
                     augmented = _augment_lines(xs, ys, geometry.inner.bounds, config.grid_step_m, budget)
                 stage_xs, stage_ys = augmented if fallback else (xs, ys)
+                graph_started = time.monotonic()
                 graph = _build_graph(stage_xs, stage_ys, geometry, terminal_vertices, config, transit_mode, budget)
+                graph_seconds = time.monotonic() - graph_started
                 start, goal = terminal_vertices[start_id], terminal_vertices[goal_id]
                 # An isolated terminal node can make a self-query appear connected.
                 # Check physical eligibility before any connectivity shortcut.
@@ -458,6 +496,8 @@ def build_routing_graph(plan, terminals: Mapping[str, Coord], start_id: str, goa
                                for p in (start, goal))
                 connected = eligible and _connected(graph, start, goal, budget)
                 budget.check("connectivity completion")
+                if stage_sink is not None:
+                    stage_sink(transit_mode, fallback, graph, graph_seconds)
                 attempts.append(GraphAttempt(transit_mode, fallback, connected))
                 if connected:
                     diagnostics = ()
@@ -476,4 +516,5 @@ def build_routing_graph(plan, terminals: Mapping[str, Coord], start_id: str, goa
     except AttributeError as error:
         raise ValueError(f"Missing or malformed BACKEND_SCHEMA field: {error}") from error
     return GraphBuildResult(status, terminal_vertices=terminal_vertices, transit_mode=transit_mode,
-                            fallback_used=fallback, attempts=tuple(attempts), diagnostics=diagnostics)
+                            fallback_used=fallback, attempts=tuple(attempts), diagnostics=diagnostics,
+                            cacheable_unsupported=status == "unsupported_geometry" and not geometry_validated)

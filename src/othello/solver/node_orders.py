@@ -68,8 +68,11 @@ def enumerate_visiting_orders(
     """
     if not isinstance(hub_id, str) or not hub_id:
         raise ValueError("hub_id must be a nonempty string")
-    if not isinstance(node_ids, (tuple, list)) or not 1 <= len(node_ids) <= 5:
-        raise ValueError("node_ids must contain 1 to 5 fixed nodes")
+    maximum = getattr(config, "max_nodes_per_hub", 5)
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or not 1 <= maximum <= 5:
+        raise ValueError("max_nodes_per_hub must be between 1 and 5")
+    if not isinstance(node_ids, (tuple, list)) or not 1 <= len(node_ids) <= maximum:
+        raise ValueError(f"node_ids must contain 1 to {maximum} fixed nodes")
     if any(not isinstance(node_id, str) or not node_id for node_id in node_ids):
         raise ValueError("node_ids must be nonempty strings")
     if len(set(node_ids)) != len(node_ids) or hub_id in node_ids:
