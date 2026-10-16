@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   ArrowDownToLine,
   Axis3d,
   Braces,
   Check,
   ChevronDown,
+  ChevronsLeft,
+  ChevronsRight,
   Copy,
   DoorOpen,
   FileJson2,
@@ -12,10 +14,11 @@ import {
   Layers3,
   LoaderCircle,
   Maximize2,
+  Minimize2,
   Minus,
-  MousePointer2,
   Play,
   Route,
+  RotateCcw,
   ScanLine,
   ShieldCheck,
   SlidersHorizontal,
@@ -24,6 +27,8 @@ import {
   TriangleAlert,
   Upload,
   X,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import TwinScene, { type CameraPresetId, type Inspection } from "./components/TwinScene";
 import { normalizePlan, PRESET_IDS, PRESET_JSON, type PlanModel } from "./lib/resplan";
@@ -40,17 +45,25 @@ const presetButtons: Array<{ id: CameraPresetId; label: string; icon: typeof Gri
 ];
 
 const presetCards: Record<string, { title: string; note: string }> = {
-  BENCHMARK_6R: { title: "SLIDE 5 / 6-ROOM BENCHMARK", note: "2 hubs · single-door dead ends" },
-  RESPLAN_8R: { title: "RESPLAN 8-ROOM", note: "area capacity bound → 2 hubs" },
-  COMPLEX_12R: { title: "COMPLEX 12-ROOM", note: "L-shaped living · 3 hubs" },
+  BENCHMARK_6R: { title: "6-ROOM EXAMPLE", note: "door-linked rooms · 2 hubs" },
+  RESPLAN_8R: { title: "8-ROOM EXAMPLE", note: "area and node capacity" },
+  COMPLEX_12R: { title: "12-ROOM EXAMPLE", note: "larger connected floor plan" },
 };
 
 const solverStages = [
-  "scale normalisation  ·  m = units · sqrt(inner.area / area)",
-  "min-hub contiguous districting  ·  ≤5 nodes · ≤100 m²",
-  "axis-aligned door-constrained pathfinding  ·  BFS over door graph",
-  "metric TSP ring sequencing  ·  NN seed + 2-opt refinement",
-  "penalty audit  ·  J = L + 5X + O + 0.5B",
+  "convert drawing coordinates to metres",
+  "calculate the hub lower bound from nodes and area",
+  "group connected rooms within both hub limits",
+  "place hubs and visit each node in a closed ring",
+  "measure length, crossings, overlap and bends",
+];
+
+const backendStages = [
+  "scale coordinates with the plan's area ratio",
+  "enumerate connected room groups; enforce 5 nodes / 100 m²",
+  "try legal hub points at least 0.5 m from walls",
+  "enumerate visit orders and search rectilinear routes",
+  "score complete rings and run the independent checker",
 ];
 
 type RunState = "ready" | "solving" | "verified";
@@ -63,14 +76,24 @@ export default function App() {
   const [warnings, setWarnings] = useState<string[]>([]);
   const [showZones, setShowZones] = useState(true);
   const [showRoutes, setShowRoutes] = useState(true);
+  const [panelCollapsed, setPanelCollapsed] = useState(() => window.matchMedia("(max-width: 860px)").matches);
+  const [modelView, setModelView] = useState(false);
+  const modelViewRef = useRef(modelView);
+  modelViewRef.current = modelView;
   const [wallSlice, setWallSlice] = useState(2.2);
+  const [zoomLevel, setZoomLevel] = useState(1);
   const [phase, setPhase] = useState(0);
-  const [stage, setStage] = useState(-1);
   const [selected, setSelected] = useState<Inspection | null>(null);
   const [runState, setRunState] = useState<RunState>("ready");
   const [optimizeSignal, setOptimizeSignal] = useState(0);
-  const [preset, setPreset] = useState<{ id: CameraPresetId; token: number }>({ id: "iso", token: 0 });
+  const [preset, setPreset] = useState<{ id: CameraPresetId | "reset"; token: number }>({ id: "iso", token: 0 });
   const [activePreset, setActivePreset] = useState<CameraPresetId | null>(null);
+  const handleScrollView = useCallback(() => setActivePreset(null), []);
+  const handleInspect = useCallback((item: Inspection | null) => {
+    if (!modelViewRef.current) setSelected(item);
+  }, []);
+  const sliceSliderStyle = { "--range-progress": `${(wallSlice / 2.2) * 100}%` } as CSSProperties;
+  const zoomSliderStyle = { "--range-progress": `${((zoomLevel - 0.65) / 1.15) * 100}%` } as CSSProperties;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -119,14 +142,11 @@ export default function App() {
 
   useEffect(() => {
     if (runState !== "solving") return;
-    const timers = solverStages.map((_, index) => window.setTimeout(() => setStage(index), 320 + index * 330));
     const done = window.setTimeout(() => {
-      setStage(solverStages.length - 1);
       setRunState("verified");
       setOptimizeSignal((value) => value + 1);
     }, 320 + solverStages.length * 330);
     return () => {
-      timers.forEach(clearTimeout);
       clearTimeout(done);
     };
   }, [runState]);
@@ -137,18 +157,28 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [copied]);
 
+  useEffect(() => {
+    if (!modelView) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [modelView]);
+
   const loadPlan = useCallback((key: string, json: Record<string, unknown>, label: string) => {
     setPlanKey(key);
     setRawPlan(json);
     setPlanLabel(label);
     setSelected(null);
-    setStage(-1);
+    setOfficial(null);
+    setOverlayDraw(null);
+    setResultDismissed(false);
     setRunState("solving");
   }, []);
 
   const runSolver = () => {
     setSelected(null);
-    setStage(-1);
     setResultDismissed(true);
     setRunState("solving");
     setShowZones(true);
@@ -165,8 +195,10 @@ export default function App() {
     try {
       const text = await file.text();
       const data = JSON.parse(text) as Record<string, unknown>;
-      if (!requirePlan()) return;
+      const target = requirePlan();
+      if (!target) return;
       if (!Array.isArray(data.hubs)) throw new Error("missing hubs[] — expected the official output file");
+      if (typeof data.plan_id === "string" && data.plan_id !== target.plan_id) throw new Error(`plan_id ${data.plan_id} does not match ${target.plan_id}`);
       setOfficial({ text, data, name: file.name });
       setResultDismissed(false);
       setShowRoutes(true);
@@ -182,6 +214,7 @@ export default function App() {
       const target = requirePlan();
       if (!target) return;
       const parsed = parseOverlay(data, target);
+      if (parsed.planId && parsed.planId !== target.plan_id) throw new Error(`plan_id ${parsed.planId} does not match ${target.plan_id}`);
       setOverlayDraw(parsed);
       setWarnings((current) => [...current, ...parsed.warnings]);
       if (official) setResultDismissed(false);
@@ -227,31 +260,43 @@ export default function App() {
   };
 
   const metrics = activeSolution?.metrics;
+  const scoredMetrics = isBackend && !overlayDraw?.metrics ? null : metrics;
   const ruleChecks = activeSolution?.checks ?? [];
   const knownChecks = ruleChecks.filter((check) => !check.na);
   const feasible = knownChecks.length > 0 && knownChecks.every((check) => check.pass);
   const hasFailures = knownChecks.some((check) => !check.pass);
+  const minimumProof = isBackend && overlayDraw?.provenMinimum === true;
+  const displayedStages = isBackend ? backendStages : solverStages;
+  const scaleSource = rawPlan.m_per_unit != null || rawPlan.metres_per_unit != null || rawPlan.meters_per_unit != null
+    ? "declared metres per unit"
+    : rawPlan.scale != null || rawPlan.units_per_metre != null
+      ? "declared units per metre"
+      : typeof rawPlan.area === "number" && typeof (rawPlan.inner as { area?: unknown } | undefined)?.area === "number"
+        ? Number(rawPlan.area) > Number((rawPlan.inner as { area: number }).area)
+          ? "√(area ÷ inner.area) units/m"
+          : "√(inner.area ÷ area) units/m"
+        : "fallback scale; check source JSON";
+  const lowerByNodes = plan ? Math.ceil(plan.eligibleRooms.length / 5) : 0;
+  const lowerByArea = plan ? Math.ceil(plan.eligibleAreaM2 / 100) : 0;
   const badgeLabel =
     runState === "solving"
-      ? "RUNNING"
+      ? "REPLAYING"
       : isBackend
         ? hasFailures
           ? "VIOLATIONS"
           : feasible
-            ? "FEASIBLE"
+            ? "CHECKED"
             : "RECEIVED"
         : feasible
-          ? "FEASIBLE"
+          ? "DEMO CHECKS PASS"
           : "IDLE";
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${panelCollapsed ? " panel-collapsed" : ""}${modelView ? " model-view" : ""}`}>
       <header className="topbar">
         <div className="brand-lockup">
           <span className="brand-mark"><span /></span>
-          <span className="brand-name">HONEYWELL</span>
-          <span className="brand-divider" />
-          <span className="product-name">RESPLAN · HUB &amp; RING OPTIMIZER</span>
+          <span className="brand-name">NodeRithm</span>
         </div>
         <div className="topbar-center" aria-label="Workflow phase">
           {phases.map((label, index) => (
@@ -275,7 +320,6 @@ export default function App() {
           <button type="button" className="ghost-action" onClick={() => fileInput.current?.click()}>
             <Upload size={14} /> UPLOAD RESPLAN JSON
           </button>
-          <div className="system-state"><span className="led" /> {feasible ? "FEASIBLE" : "SOLVER ONLINE"}</div>
         </div>
       </header>
 
@@ -289,11 +333,15 @@ export default function App() {
               showZones={showZones}
               showRoutes={showRoutes}
               wallHeight={wallSlice / 2.2}
+              zoomLevel={zoomLevel}
               optimizeSignal={optimizeSignal}
               preset={preset}
               focusHub={selected?.hub ?? null}
-              onInspect={setSelected}
+              modelShift={modelView ? 0 : panelCollapsed ? 0.11 : -0.12}
+              modelView={modelView}
+              onInspect={handleInspect}
               onPhaseChange={setPhase}
+              onScrollView={handleScrollView}
             />
           ) : (
             <div className="scene-fallback">
@@ -316,12 +364,10 @@ export default function App() {
 
         <section className="story-panel intro-panel">
           <div className="intro-copy">
-            <p className="overline"><span>UR HACKATHON 2026H2</span> DIGITAL TWIN · CLOSED-RING HAMILTONIAN NETWORK</p>
-            <h1><span>HONEYWELL</span>RESPLAN</h1>
-            <p className="hero-line">Any floor plan in. One optimal ring per hub out.</p>
+            <h1><span>PLAN TO PATH</span>NodeRithm</h1>
+            <p className="hero-line">Follow every decision from floor plan to cable route.</p>
             <p className="hero-support">
-              Upload a raw ResPlan JSON — drawing units are normalised through the plan's own area ratio, hub districts are grown over the door
-              graph, and every cable run is rectilinear, door-constrained, and scored with J = L + 5X + O + 0.5B.
+              Choose an example or upload a plan JSON to explore its hubs, routes and score.
             </p>
             <div className="plan-picker">
               {PRESET_IDS.map((id) => (
@@ -352,33 +398,10 @@ export default function App() {
                 }}
                 onClick={() => fileInput.current?.click()}
               >
-                <FileJson2 size={13} />
+                <FileJson2 size={24} />
                 <span>{dragging ? "RELEASE TO INGEST" : "DROP PLAN.JSON"}</span>
-                <small>or click to browse</small>
+                <small>Drag a plan here or click to browse</small>
               </button>
-            </div>
-            <div className="result-loader">
-              <span className="loader-title">
-                BACKEND RESULT
-                <small>v1 · FILE-BASED</small>
-              </span>
-              <button type="button" className={official ? "plan-chip active" : "plan-chip"} onClick={() => resultInput.current?.click()}>
-                <FileJson2 size={13} />
-                <span>{official ? official.name : "LOAD <PLAN_ID>.JSON"}</span>
-                <small>official output · slide 8/8</small>
-              </button>
-              <button type="button" className={overlayDraw ? "plan-chip active" : "plan-chip"} onClick={() => overlayInput.current?.click()}>
-                <ScanLine size={13} />
-                <span>{overlayDraw ? "OVERLAY LOADED" : "LOAD <PLAN_ID>.OVERLAY.JSON"}</span>
-                <small>
-                  {overlayDraw ? `schema v${overlayDraw.schemaVersion ?? "?"} · ${overlayDraw.violations.length} violations` : "walls · windows · markers · rules"}
-                </small>
-              </button>
-              {(official || overlayDraw) && (
-                <button type="button" className="loader-clear" onClick={clearResult}>
-                  <X size={12} /> CLEAR
-                </button>
-              )}
             </div>
             <input
               ref={resultInput}
@@ -405,29 +428,36 @@ export default function App() {
             <div className="hero-actions">
               <button type="button" className="primary-action" onClick={runSolver} disabled={runState === "solving" || !plan}>
                 {runState === "solving" ? <LoaderCircle size={16} className="spin" /> : <Play size={15} fill="currentColor" />}
-                {runState === "solving" ? "SOLVING…" : "RUN OPTIMIZATION"}
+                {runState === "solving" ? "REPLAYING…" : "REPLAY SOLUTION STEPS"}
               </button>
-              <a href="#territories" className="scroll-action">TRACE THE RINGS <ChevronDown size={16} /></a>
+              <a href="#territories" className="scroll-action">SEE HOW IT WAS DERIVED <ChevronDown size={16} /></a>
             </div>
             {planError && (
               <p className="error-note"><TriangleAlert size={13} /> {planError}</p>
             )}
           </div>
-          <div className="scroll-cue"><span>SCROLL TO TRACE</span><i /></div>
         </section>
 
         <section id="territories" className="story-panel narrative-panel">
           <div className="narrative-copy">
-            <p className="chapter">01 / SCALE &amp; TERRITORY</p>
-            <h2>Units become metres.<br />Rooms become districts.</h2>
+            <p className="chapter">01 / SCALE &amp; HUB COUNT</p>
+            <h2>First, measure<br />the plan.</h2>
             <p>
               {plan
-                ? `${plan.rooms.length} spaces parsed · ${plan.eligibleRooms.length} eligible · ${plan.doors.length} door links · ` +
-                  `${plan.eligibleAreaM2.toFixed(1)} m² of assigned-eligible area.`
-                : "Load a plan to normalise coordinates."}
+                ? `${plan.plan_id}: ${plan.rooms.length} rooms, ${plan.eligibleRooms.length} eligible nodes and ${plan.doors.length} door links. ` +
+                  `The eligible room polygons total ${plan.eligibleAreaM2.toFixed(1)} m². ` +
+                  `Scale: ${plan.unitsPerM.toFixed(2)} drawing units/m (${scaleSource}).`
+                : "Load a plan to see its scale and room counts."}
             </p>
+            {plan && (
+              <div className="derivation">
+                <strong>H lower bound = max(⌈nodes ÷ 5⌉, ⌈area ÷ 100⌉)</strong>
+                <span>max(⌈{plan.eligibleRooms.length} ÷ 5⌉ = {lowerByNodes}, ⌈{plan.eligibleAreaM2.toFixed(1)} ÷ 100⌉ = {lowerByArea}) = {Math.max(lowerByNodes, lowerByArea)}</span>
+                <small>{minimumProof ? "The backend proved the displayed hub count is minimal." : "This bound alone does not prove the displayed design is optimal."}</small>
+              </div>
+            )}
             <div className="chapter-rule">
-              <span>H_MIN {metrics?.hubLowerBound ?? "—"}</span>
+              <span>LOWER BOUND {metrics?.hubLowerBound ?? "—"}</span>
               <span>USED {activeSolution?.hubs.length ?? "—"}</span>
               <span>NODES {metrics?.nodeCount ?? "—"}</span>
             </div>
@@ -436,27 +466,46 @@ export default function App() {
 
         <section className="story-panel narrative-panel route-panel">
           <div className="narrative-copy">
-            <p className="chapter">02 / MANHATTAN CONDUITS</p>
-            <h2>A closed ring.<br />No shortcuts, no overlap.</h2>
+            <p className="chapter">02 / GROUPS &amp; RINGS</p>
+            <h2>Every node gets<br />one return path.</h2>
             <p>
-              Every hop is routed through the door graph with beveled elbow trays. Single-door rooms get laterally offset
-              parallel lanes (Δ ≈ 0.22 m) plus stacked tiers, so O stays at zero while the ring re-enters the same threshold.
+              {isBackend
+                ? "The backend enumerates connected room groups, tries legal hub spots, visit orders and rectilinear routes, then checks the full design. Each ring starts at its hub, visits every assigned node once and returns to that hub."
+                : "The browser preview grows connected room groups, places a hub in each group, orders nodes with a nearest-neighbour seed and 2-opt, and routes between them through doors. Load backend output and overlay files for the full solver and independent checks."}
             </p>
-            <div className="equation">H <b>→</b> N1 <b>→</b> N2 <b>→</b> … <b>→</b> Nk <b>→</b> H</div>
+            <div className="hub-derivations">
+              {(activeSolution?.hubs ?? []).map((hub) => (
+                <div className="hub-derivation" key={hub.hub_id}>
+                  <strong>{hub.hub_id} in {hub.room_id} at ({hub.location[0].toFixed(2)}, {hub.location[1].toFixed(2)}) m</strong>
+                  <span>{hub.assigned_nodes.length}/5 nodes · {hub.area_m2.toFixed(1)}/100 m²</span>
+                  <span>Rooms: {hub.assigned_rooms.join(", ")}</span>
+                  <span>Visit: {hub.closed_sequence.join(" → ")}</span>
+                  <span>{hub.route_segments.length} legs including return · {hub.ring_length_m.toFixed(2)} m</span>
+                  <span>Legs: {hub.route_segments.map((leg) => `${leg.from}→${leg.to} ${leg.length_m.toFixed(1)}m`).join(" · ")}</span>
+                </div>
+              ))}
+            </div>
           </div>
         </section>
 
         <section className="story-panel narrative-panel audit-panel">
           <div className="narrative-copy">
-            <p className="chapter">03 / PENALTY AUDIT</p>
+            <p className="chapter">03 / SCORE &amp; CHECKS</p>
             <h2>Ranked on hubs first,<br />then on cost J.</h2>
             <p>
-              {metrics
-                ? `L ${metrics.L.toFixed(2)} m · X ${metrics.X} · O ${metrics.O.toFixed(2)} m · B ${metrics.B} · area gap ${metrics.areaGap.toFixed(1)} m²`
-                : "Solver idle."}
+              {scoredMetrics
+                ? `${scoredMetrics.L.toFixed(2)} m of cable + 5 × ${scoredMetrics.X} crossings + ${scoredMetrics.O.toFixed(2)} m overlap + 0.5 × ${scoredMetrics.B} bends = J ${scoredMetrics.J.toFixed(2)}. ` +
+                  `Area gap: ${scoredMetrics.areaGap.toFixed(1)} m². ${isBackend && overlayDraw?.checks.length ? `${overlayDraw.checks.filter((check) => check.pass).length}/${overlayDraw.checks.length} backend checks pass.` : "Browser checks are a preview; load the backend overlay for its independent checker results."}`
+                : isBackend ? "Load this result's overlay JSON to see the checker score breakdown." : "Load a plan to see the measured score."}
             </p>
+            <div className="derivation">
+              <strong>What the score counts</strong>
+              <span>L includes every leg and the return trip. X counts cable crossings away from hubs and nodes. O measures shared cable length. B counts direction changes, including at stops.</span>
+              <small>Compare hub count first, then J, then the gap between the largest and smallest assigned hub areas.</small>
+            </div>
+            {isBackend && overlayDraw?.notes.length ? <p>{overlayDraw.notes.join(" ")}</p> : null}
             <button type="button" className="export-action" onClick={() => setDrawerOpen(true)}>
-              <Braces size={16} /> OPEN SLIDE 8/8 OUTPUT
+              <Braces size={16} /> OPEN SOLUTION JSON
             </button>
           </div>
         </section>
@@ -485,6 +534,8 @@ export default function App() {
             key={id}
             type="button"
             className={activePreset === id ? "active" : ""}
+            aria-label={label}
+            title={label}
             aria-pressed={activePreset === id}
             onClick={() => {
               setActivePreset(id);
@@ -494,31 +545,53 @@ export default function App() {
             <Icon size={14} /><span>{label}</span>
           </button>
         ))}
+        <button
+          type="button"
+          className="reset-view"
+          aria-label="Reset to scroll view"
+          title="Reset to scroll view"
+          onClick={() => {
+            setActivePreset(null);
+            setSelected(null);
+            setPreset((current) => ({ id: "reset", token: current.token + 1 }));
+          }}
+        >
+          <RotateCcw size={14} /><span>RESET VIEW</span>
+        </button>
       </nav>
 
-      <aside className="validation-panel" aria-label="Live scoring and constraint validation">
+      {panelCollapsed && (
+        <button type="button" className="panel-reopen" onClick={() => setPanelCollapsed(false)} aria-label="Show rules and score panel" aria-controls="rules-score-panel" aria-expanded={false}>
+          <ChevronsLeft size={16} /> <span>RULES &amp; SCORE</span> <strong>J {scoredMetrics ? scoredMetrics.J.toFixed(1) : "—"}</strong>
+        </button>
+      )}
+      <aside id="rules-score-panel" className={panelCollapsed ? "validation-panel collapsed" : "validation-panel"} aria-label="Rules and score" aria-hidden={panelCollapsed} inert={panelCollapsed}>
         <div className="panel-head">
           <div>
-            <span className="panel-kicker">OFFICIAL SCORING ENGINE</span>
-            <h2>VALIDATION MATRIX</h2>
+            <h2>RULES &amp; SCORE</h2>
           </div>
-          <span
-            className={
-              runState === "solving"
-                ? "validation-badge solving"
-                : hasFailures
-                  ? "validation-badge fail"
-                  : feasible || isBackend
-                    ? "validation-badge"
-                    : "validation-badge warn"
-            }
-          >
-            <i className="led" />
-            {badgeLabel}
-          </span>
+          <div className="panel-head-actions">
+            <span
+              className={
+                runState === "solving"
+                  ? "validation-badge solving"
+                  : hasFailures
+                    ? "validation-badge fail"
+                    : feasible || isBackend
+                      ? "validation-badge"
+                      : "validation-badge warn"
+              }
+            >
+              <i className="led" />
+              {badgeLabel}
+            </span>
+            <button type="button" className="panel-collapse" onClick={() => setPanelCollapsed(true)} aria-label="Collapse rules and score panel" aria-controls="rules-score-panel" aria-expanded={true} title="Collapse panel">
+              <ChevronsRight size={16} />
+            </button>
+          </div>
         </div>
         <div className="source-line">
-          {isBackend ? "BACKEND RESULT · METRICS FROM CHECKER SUMMARY" : "DEMO HEURISTIC · OFFICIAL CHECKER RECOMPUTES J FROM EXPORTED POLYLINES"}
+          {isBackend ? (overlayDraw?.metrics ? "Score and checks from the backend overlay" : "Load the matching overlay for the full score and checks") : "Browser estimate · load an overlay for independent checks"}
         </div>
 
         <div className="cost-card">
@@ -526,13 +599,13 @@ export default function App() {
             <span>SCORE</span>
             <em>J = L + 5X + O + 0.5B</em>
           </div>
-          <strong>{metrics ? metrics.J.toFixed(2) : "—"}</strong>
+          <strong>{scoredMetrics ? scoredMetrics.J.toFixed(2) : "—"}</strong>
           <div className="cost-grid">
             {[
               { k: "L", v: metrics ? `${metrics.L.toFixed(2)} m` : "—", n: "cable length" },
-              { k: "X", v: metrics ? `${metrics.X}` : "—", n: "crossings ×5" },
-              { k: "O", v: metrics ? `${metrics.O.toFixed(2)} m` : "—", n: "overlap / m" },
-              { k: "B", v: metrics ? `${metrics.B}` : "—", n: "bends ×0.5" },
+              { k: "X", v: scoredMetrics ? `${scoredMetrics.X}` : "—", n: "crossings · 5 each" },
+              { k: "O", v: scoredMetrics ? `${scoredMetrics.O.toFixed(2)} m` : "—", n: "shared cable length" },
+              { k: "B", v: scoredMetrics ? `${scoredMetrics.B}` : "—", n: "bends · 0.5 each" },
             ].map((item) => (
               <div key={item.k} className="cost-cell">
                 <span>{item.k}</span>
@@ -543,25 +616,22 @@ export default function App() {
           </div>
           <div className="cost-extra">
             <span>HUBS <strong>{activeSolution?.hubs.length ?? 0}</strong> / LOWER BOUND <strong>{metrics?.hubLowerBound ?? 0}</strong></span>
-            <span>AREA GAP |A₁−A₂| <strong>{metrics ? `${metrics.areaGap.toFixed(1)} m²` : "—"}</strong></span>
+            <span>AREA GAP MAX−MIN <strong>{scoredMetrics ? `${scoredMetrics.areaGap.toFixed(1)} m²` : "—"}</strong></span>
           </div>
         </div>
 
-        <div className="solver-status">
-          <div className="solver-status-head">
-            <span>{runState === "solving" ? "SOLVER PASS" : isBackend ? "BACKEND RESULT" : runState === "verified" ? "LAST SOLVE" : "AWAITING RUN"}</span>
-            <strong>{runState === "solving" ? `${Math.min(stage + 1, solverStages.length)}/${solverStages.length}` : isBackend ? (official?.name ?? "RESULT") : `ITER ${activeSolution?.iterations ?? 0}`}</strong>
-          </div>
-          <ul className={runState === "solving" ? "stage-log live" : "stage-log"}>
-            {solverStages.map((label, index) => (
-              <li key={label} className={runState === "solving" && index === stage ? "active" : runState !== "solving" ? "done" : index < stage ? "done" : ""}>
-                <i /> {label}
-              </li>
-            ))}
-          </ul>
-        </div>
+        <details className="solver-status">
+          <summary className="solver-status-head">
+            <span>HOW THE SOLUTION IS DERIVED</span>
+            <ChevronDown size={15} />
+          </summary>
+          <ol className="stage-log">
+            {displayedStages.map((label) => <li key={label}>{label}</li>)}
+          </ol>
+        </details>
 
         <div className="checks">
+          <h3 className="panel-section-title">RULE CHECKS <span>{knownChecks.filter((check) => check.pass).length}/{knownChecks.length} PASS</span></h3>
           {(activeSolution?.checks ?? []).map((check) => (
             <div key={check.id} className={check.na ? "check-row na" : check.pass ? "check-row pass" : "check-row fail"}>
               {check.na ? <Minus size={14} /> : check.pass ? <Check size={14} /> : <X size={14} />}
@@ -572,7 +642,7 @@ export default function App() {
         </div>
 
         <div className="load-section">
-          <div className="load-head"><span>HUB LOAD / AREA</span><span>≤5 · ≤100 M²</span></div>
+          <div className="load-head"><span>HUB LOAD / AREA</span><span>MAX 5 NODES · 100 M²</span></div>
           {(activeSolution?.hubs ?? []).map((hub, index) => (
             <div key={hub.hub_id} className="load-row" style={{ ["--lane" as string]: hub.color }}>
               <span>{hub.hub_id}</span>
@@ -580,7 +650,7 @@ export default function App() {
                 <b style={{ width: `${(hub.assigned_nodes.length / 5) * 100}%` }} />
                 <u style={{ width: `${Math.min(100, (hub.area_m2 / 100) * 100)}%` }} />
               </i>
-              <strong>{hub.assigned_nodes.length}·{hub.area_m2.toFixed(0)}</strong>
+              <strong>{hub.assigned_nodes.length} N · {hub.area_m2.toFixed(0)} m²</strong>
               <em className={`load-zone z${index % 4}`}>{hub.assigned_rooms.length} RM</em>
             </div>
           ))}
@@ -599,6 +669,7 @@ export default function App() {
             max={2.2}
             step={0.01}
             value={wallSlice}
+            style={sliceSliderStyle}
             onChange={(event) => setWallSlice(Number(event.target.value))}
           />
           <div className="slice-scale"><span>0.00</span><span>1.10</span><span>2.20</span></div>
@@ -621,31 +692,57 @@ export default function App() {
           <h3>{selected.title}</h3>
           <p>{selected.detail}</p>
           <p className="inspector-coords">{selected.coords}</p>
-          <div><span>{selected.zone}</span><strong><Check size={12} /> VERIFIED</strong></div>
+          <div><span>{selected.zone}</span><strong>{isBackend && overlayDraw?.valid === true ? "CHECKED" : "PREVIEW"}</strong></div>
         </aside>
       )}
 
       <div className="view-toolbar" aria-label="Model visibility controls">
-        <div className="toolbar-hint"><MousePointer2 size={13} /> DRAG TO ORBIT</div>
-        <button type="button" className={showZones ? "active" : ""} aria-pressed={showZones} onClick={() => setShowZones((value) => !value)}>
+        <button
+          type="button"
+          className={modelView ? "model-view-toggle active" : "model-view-toggle"}
+          aria-pressed={modelView}
+          aria-label={modelView ? "Exit model view" : "Enter model view"}
+          title={modelView ? "Exit model view" : "Model view"}
+          onClick={() => {
+            setModelView((value) => !value);
+            setSelected(null);
+            setDrawerOpen(false);
+          }}
+        >
+          {modelView ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+          <span>{modelView ? "EXIT MODEL VIEW" : "MODEL VIEW"}</span>
+        </button>
+        <button type="button" className={showZones ? "active" : ""} aria-label="Toggle zones" title="Toggle zones" aria-pressed={showZones} onClick={() => setShowZones((value) => !value)}>
           <Layers3 size={16} /><span>ZONES</span>
         </button>
-        <button type="button" className={showRoutes ? "active" : ""} aria-pressed={showRoutes} onClick={() => setShowRoutes((value) => !value)}>
+        <button type="button" className={showRoutes ? "active" : ""} aria-label="Toggle conduits" title="Toggle conduits" aria-pressed={showRoutes} onClick={() => setShowRoutes((value) => !value)}>
           <Route size={16} /><span>CONDUITS</span>
         </button>
-        <button type="button" onClick={runSolver} disabled={runState === "solving"}>
-          {runState === "solving" ? <LoaderCircle size={16} className="spin" /> : <Play size={14} fill="currentColor" />}<span>RESOLVE</span>
-        </button>
-        <button type="button" className={drawerOpen ? "active" : ""} aria-pressed={drawerOpen} onClick={() => setDrawerOpen((value) => !value)}>
+        <button type="button" className={drawerOpen ? "toolbar-output active" : "toolbar-output"} aria-label="Open output JSON" title="Open output JSON" aria-pressed={drawerOpen} onClick={() => setDrawerOpen((value) => !value)}>
           <Braces size={16} /><span>OUTPUT JSON</span>
         </button>
-        <button type="button" onClick={() => setSelected(null)}>
+        <button type="button" className="toolbar-reset-pick" aria-label="Clear selection" title="Clear selection" onClick={() => setSelected(null)}>
           <ScanLine size={16} /><span>RESET PICK</span>
         </button>
+        <div className="toolbar-zoom" aria-label="Model zoom">
+          <ZoomOut size={13} aria-hidden="true" />
+          <input
+            type="range"
+            min={0.65}
+            max={1.8}
+            step={0.01}
+            value={zoomLevel}
+            style={zoomSliderStyle}
+            aria-label="Zoom 3D model"
+            aria-valuetext={`${Math.round(zoomLevel * 100)}%`}
+            onChange={(event) => setZoomLevel(Number(event.target.value))}
+          />
+          <ZoomIn size={13} aria-hidden="true" />
+        </div>
       </div>
 
       <div className="mobile-status">
-        <span><i className="led" /> {feasible ? "FEASIBLE" : "CHECKING"}</span>
+        <span><i className="led" /> {isBackend && overlayDraw?.valid === true ? "CHECKED" : "PREVIEW"}</span>
         <input
           className="slice-slider mobile-slice"
           type="range"
@@ -654,16 +751,17 @@ export default function App() {
           max={2.2}
           step={0.01}
           value={wallSlice}
+          style={sliceSliderStyle}
           onChange={(event) => setWallSlice(Number(event.target.value))}
         />
-        <strong>J {metrics ? metrics.J.toFixed(1) : "—"}</strong>
+        <strong>J {scoredMetrics ? scoredMetrics.J.toFixed(1) : "—"}</strong>
       </div>
 
       <section className={drawerOpen ? "json-drawer open" : "json-drawer"} aria-hidden={!drawerOpen}>
         <header>
           <div className="drawer-title">
             <Braces size={15} />
-            <span>{isBackend ? "BACKEND OUTPUT · VERBATIM FILE" : "DEMO OUTPUT · SLIDE 8/8 SHAPE"}</span>
+            <span>SOLUTION JSON</span>
             <code>{isBackend ? (official?.name ?? "result.json") : activeSolution ? `${activeSolution.plan_id.toLowerCase()}-solution.json` : "awaiting-plan"}</code>
           </div>
           <div className="drawer-scores">
@@ -673,7 +771,7 @@ export default function App() {
             </span>
             <span className="pill">H {activeSolution?.hubs.length ?? 0}</span>
             <span className="pill">L {metrics ? metrics.L.toFixed(2) : "—"} M</span>
-            <span className="pill ok">J {metrics ? metrics.J.toFixed(2) : "—"}</span>
+            <span className="pill ok">J {scoredMetrics ? scoredMetrics.J.toFixed(2) : "—"}</span>
           </div>
           <div className="drawer-actions">
             <button type="button" onClick={copyJson}>{copied ? <Check size={14} /> : <Copy size={14} />}{copied ? "COPIED" : "COPY JSON"}</button>
@@ -681,6 +779,14 @@ export default function App() {
             <button type="button" aria-label="Close output drawer" onClick={() => setDrawerOpen(false)}><X size={15} /></button>
           </div>
         </header>
+        <details className="drawer-import">
+          <summary>Use solver files <ChevronDown size={14} /></summary>
+          <div>
+            <button type="button" onClick={() => resultInput.current?.click()}><FileJson2 size={14} /> {official ? `Solution: ${official.name}` : "Import solution JSON"}</button>
+            <button type="button" onClick={() => overlayInput.current?.click()}><ScanLine size={14} /> {overlayDraw ? "Overlay loaded" : "Import overlay JSON"}</button>
+            {(official || overlayDraw) && <button type="button" onClick={clearResult}><X size={14} /> Clear solver files</button>}
+          </div>
+        </details>
         <pre><code>{jsonText}</code></pre>
       </section>
     </div>

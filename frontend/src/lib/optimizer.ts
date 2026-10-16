@@ -193,6 +193,26 @@ const bendCount = (pts: Vec2[]) => {
   return bends;
 };
 
+const ringBendCount = (legs: RouteSegment[]) => {
+  const direction = (points: Vec2[], fromEnd: boolean): Vec2 => {
+    const steps = fromEnd ? points.slice().reverse() : points;
+    for (let index = 1; index < steps.length; index += 1) {
+      const dx = Math.sign(steps[index][0] - steps[index - 1][0]);
+      const dy = Math.sign(steps[index][1] - steps[index - 1][1]);
+      if (dx || dy) return fromEnd ? [-dx, -dy] : [dx, dy];
+    }
+    return [0, 0];
+  };
+  let count = legs.reduce((total, leg) => total + bendCount(leg.polyline), 0);
+  legs.forEach((leg, index) => {
+    const next = legs[(index + 1) % legs.length];
+    const incoming = direction(leg.polyline, true);
+    const outgoing = direction(next.polyline, false);
+    if (incoming[0] !== outgoing[0] || incoming[1] !== outgoing[1]) count += 1;
+  });
+  return count;
+};
+
 interface Segment { p: Vec2; q: Vec2; ring: number; index: number }
 
 const orientationsIntersect = (a: Segment, b: Segment) => {
@@ -581,10 +601,10 @@ export function optimize(plan: PlanModel, hubOverride?: number): Solution {
   const L = Number(hubs.reduce((acc, hub) => acc + hub.ring_length_m, 0).toFixed(3));
   const X = countCrossings(allSegments, anchors);
   const O = Number(overlapLength(allSegments).toFixed(3));
-  const B = hubs.reduce((acc, hub) => acc + hub.route_segments.reduce((inner, seg) => inner + bendCount(seg.polyline), 0), 0);
+  const B = hubs.reduce((acc, hub) => acc + ringBendCount(hub.route_segments), 0);
   const J = Number((L + 5 * X + O + 0.5 * B).toFixed(3));
   const areas = hubs.map((hub) => hub.area_m2).sort((a, b) => b - a);
-  const areaGap = Number((areas.length > 1 ? areas[0] - areas[1] : areas[0] ?? 0).toFixed(2));
+  const areaGap = Number((areas.length > 1 ? areas[0] - areas[areas.length - 1] : 0).toFixed(2));
 
   /* ----------------------------------------------------- rule validation */
   const covered = new Set(hubs.flatMap((hub) => hub.assigned_rooms));
@@ -656,7 +676,7 @@ export function optimize(plan: PlanModel, hubOverride?: number): Solution {
     reported_metrics: output.reported_metrics,
     metrics: { L, X, O, B, J, areaGap, hubLowerBound: lowerBound, nodeCount: nodes.length, eligibleArea: Number(plan.eligibleAreaM2.toFixed(2)) },
     checks,
-    iterations: 1800 + iterations * 61 + hubs.length * 17,
+    iterations,
     output,
     source: "demo",
   };

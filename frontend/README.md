@@ -1,11 +1,11 @@
-# Othello - 3D Cable Routing Digital Twin (Frontend)
+# NodeRithm frontend
 
-Interactive 3D digital twin and BIM visualizer for Honeywell ResPlan joint hub placement and closed-ring cable routing challenge.
+Interactive floor plan viewer for hub placement and closed-ring cable routing. Upload a plan JSON to see the browser preview, or load its backend output and overlay files to view the computed design and independent checker results. The scrolling explanation uses the current plan's scale, hub lower bound, room groups, ring sequences and score.
 
 ## Features
 - **Interactive Three.js 3D Twin (`TwinScene.tsx`)**: Real-time 3D isometric and 2D floor plan rendering with camera presets, door cutouts, equipment nodes, cable trays, and animated pulse routing rings.
 - **ResPlan & Overlay Parsing (`resplan.ts`)**: Loads official schema JSON and overlay representations with door connections, zone partitions, and violations.
-- **Routing & Optimization Engine (`optimizer.ts`)**: Client-side solver support and metrics auditing.
+- **Routing & Optimization Engine (`optimizer.ts`)**: Browser preview heuristic and estimated metrics. The backend overlay supplies independent rule checks and score data.
 - **BIM Inspector & Audit Deck**: Real-time penalty breakdown, loop continuity verification, and node status indicators.
 
 ## Project Structure

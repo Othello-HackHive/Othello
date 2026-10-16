@@ -27,7 +27,7 @@ export type Inspection = {
 };
 
 export type CameraPresetId = "top" | "iso" | "zone1" | "zone2";
-export type CameraPresetRequest = { id: CameraPresetId; token: number };
+export type CameraPresetRequest = { id: CameraPresetId | "reset"; token: number };
 
 type TwinSceneProps = {
   plan: PlanModel;
@@ -36,11 +36,15 @@ type TwinSceneProps = {
   showZones: boolean;
   showRoutes: boolean;
   wallHeight: number;
+  zoomLevel: number;
   optimizeSignal: number;
   preset: CameraPresetRequest;
   focusHub: string | null;
+  modelShift: number;
+  modelView: boolean;
   onInspect: (item: Inspection | null) => void;
   onPhaseChange: (phase: number) => void;
+  onScrollView: () => void;
 };
 
 const WALL_H = 2.2;
@@ -113,11 +117,15 @@ export default function TwinScene({
   showZones,
   showRoutes,
   wallHeight,
+  zoomLevel,
   optimizeSignal,
   preset,
   focusHub,
+  modelShift,
+  modelView,
   onInspect,
   onPhaseChange,
+  onScrollView,
 }: TwinSceneProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const zoneGroupRef = useRef<THREE.Group | null>(null);
@@ -127,6 +135,12 @@ export default function TwinScene({
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const bloomRef = useRef<UnrealBloomPass | null>(null);
+  const presetTweensRef = useRef<gsap.core.Tween[]>([]);
+  const resumeTweenRef = useRef<gsap.core.Tween | null>(null);
+  const presetActiveRef = useRef(false);
+  const resumeScrollViewRef = useRef<(() => void) | null>(null);
+  const appliedShiftRef = useRef(modelShift);
+  const modelViewRef = useRef(modelView);
   const zoneMaterialsRef = useRef<Record<string, THREE.Material[]>>({});
 
   const frame = useMemo(() => {
@@ -165,6 +179,8 @@ export default function TwinScene({
 
     const camera = new THREE.PerspectiveCamera(38, 1, 0.1, frame.span * 12);
     camera.position.set(...presets.iso.position);
+    camera.zoom = zoomLevel;
+    camera.updateProjectionMatrix();
     cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
@@ -184,6 +200,7 @@ export default function TwinScene({
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
+    controls.enableZoom = false;
     controls.dampingFactor = 0.055;
     controls.minDistance = 3;
     controls.maxDistance = frame.span * 3.4;
@@ -405,7 +422,9 @@ export default function TwinScene({
 
     if (overlay?.walls?.length) {
       /* backend overlay owns the wall geometry (gaps already carved) */
-      overlay.walls.forEach((run) => addWallRun(run[0], run[run.length - 1]));
+      overlay.walls.forEach((run) => {
+        for (let index = 1; index < run.length; index += 1) addWallRun(run[index - 1], run[index]);
+      });
       overlay.openings.forEach((opening) => addThreshold(opening.from, opening.to));
     } else {
       edges.forEach(({ a, b }) => {
@@ -757,13 +776,61 @@ export default function TwinScene({
 
     /* ------------------------------------------- scroll choreography */
     let currentPhase = -1;
+    let lastScrollProgress = 0;
+    const scrollPose = {
+      position: { x: presets.iso.position[0], y: presets.iso.position[1], z: presets.iso.position[2] },
+      target: { x: presets.iso.target[0], y: presets.iso.target[1], z: presets.iso.target[2] },
+    };
+    const applyScrollPose = () => {
+      camera.position.set(scrollPose.position.x, scrollPose.position.y, scrollPose.position.z);
+      controls.target.set(scrollPose.target.x, scrollPose.target.y, scrollPose.target.z);
+    };
+    const resumeScrollView = () => {
+      presetTweensRef.current.forEach((tween) => tween.kill());
+      presetTweensRef.current = [];
+      resumeTweenRef.current?.kill();
+      presetActiveRef.current = false;
+      const startPosition = camera.position.clone();
+      const startTarget = controls.target.clone();
+      const blend = { value: 0 };
+      resumeTweenRef.current = gsap.to(blend, {
+        value: 1,
+        duration: 0.55,
+        ease: "power2.out",
+        onUpdate: () => {
+          camera.position.set(
+            THREE.MathUtils.lerp(startPosition.x, scrollPose.position.x, blend.value),
+            THREE.MathUtils.lerp(startPosition.y, scrollPose.position.y, blend.value),
+            THREE.MathUtils.lerp(startPosition.z, scrollPose.position.z, blend.value),
+          );
+          controls.target.set(
+            THREE.MathUtils.lerp(startTarget.x, scrollPose.target.x, blend.value),
+            THREE.MathUtils.lerp(startTarget.y, scrollPose.target.y, blend.value),
+            THREE.MathUtils.lerp(startTarget.z, scrollPose.target.z, blend.value),
+          );
+        },
+        onComplete: () => {
+          resumeTweenRef.current = null;
+          applyScrollPose();
+        },
+      });
+    };
+    resumeScrollViewRef.current = resumeScrollView;
     const timeline = gsap.timeline({
+      onUpdate: () => {
+        if (!presetActiveRef.current && !resumeTweenRef.current) applyScrollPose();
+      },
       scrollTrigger: {
         trigger: "#story",
         start: "top top",
         end: "bottom bottom",
         scrub: 1.1,
         onUpdate: (self) => {
+          if (presetActiveRef.current && Math.abs(self.progress - lastScrollProgress) > 0.0001) {
+            resumeScrollView();
+            onScrollView();
+          }
+          lastScrollProgress = self.progress;
           const next = Math.min(3, Math.floor(self.progress * 4));
           if (next !== currentPhase) {
             currentPhase = next;
@@ -773,12 +840,12 @@ export default function TwinScene({
       },
     });
     timeline
-      .to(camera.position, { x: 0, y: presets.top.position[1], z: 0.001, duration: 0.9, ease: "power1.inOut" }, 0.45)
-      .to(controls.target, { x: 0, y: 0, z: 0, duration: 0.9, ease: "power1.inOut" }, 0.45)
-      .to(solution.hubs[0] ? {} : {}, { duration: 0.01 }, 0.5)
-      .to(camera.position, { x: presets.zone1.position[0] + 3, y: 7.6, z: presets.zone1.position[2] + 5, duration: 1.05, ease: "power2.inOut" }, 1.42)
-      .to(controls.target, { x: presets.zone1.target[0], y: 0.2, z: presets.zone1.target[2], duration: 1.05, ease: "power2.inOut" }, 1.42)
-      .to(camera.position, { x: presets.iso.position[0] * 0.82, y: presets.iso.position[1] * 0.8, z: presets.iso.position[2] * 0.86, duration: 0.8, ease: "power1.inOut" }, 2.3);
+      .to(scrollPose.position, { x: 0, y: presets.top.position[1], z: 0.001, duration: 0.9, ease: "power1.inOut" }, 0.45)
+      .to(scrollPose.target, { x: 0, y: 0, z: 0, duration: 0.9, ease: "power1.inOut" }, 0.45)
+      .to(scrollPose.position, { x: presets.zone1.position[0] + 3, y: 7.6, z: presets.zone1.position[2] + 5, duration: 1.05, ease: "power2.inOut" }, 1.42)
+      .to(scrollPose.target, { x: presets.zone1.target[0], y: 0.2, z: presets.zone1.target[2], duration: 1.05, ease: "power2.inOut" }, 1.42)
+      .to(scrollPose.position, { x: presets.iso.position[0] * 0.82, y: presets.iso.position[1] * 0.8, z: presets.iso.position[2] * 0.86, duration: 0.8, ease: "power1.inOut" }, 2.3)
+      .to(scrollPose.target, { x: 0, y: 0.2, z: 0, duration: 0.8, ease: "power1.inOut" }, 2.3);
 
     /* -------------------------------------------------------- run loop */
     const clock = new THREE.Clock();
@@ -811,7 +878,13 @@ export default function TwinScene({
     const resize = () => {
       const width = mount.clientWidth;
       const height = mount.clientHeight;
+      const mobile = window.matchMedia("(max-width: 860px)").matches;
+      controls.enabled = !mobile || modelViewRef.current;
+      renderer.domElement.style.touchAction = mobile && !modelViewRef.current ? "pan-y" : "none";
       camera.aspect = width / Math.max(height, 1);
+      const shift = mobile ? 0 : appliedShiftRef.current;
+      if (shift) camera.setViewOffset(width, height, -Math.round(width * shift), 0, width, height);
+      else camera.clearViewOffset();
       camera.updateProjectionMatrix();
       renderer.setSize(width, height, false);
       labelRenderer.setSize(width, height);
@@ -829,6 +902,12 @@ export default function TwinScene({
       renderer.domElement.removeEventListener("pointerdown", handlePick);
       timeline.scrollTrigger?.kill();
       timeline.kill();
+      presetTweensRef.current.forEach((tween) => tween.kill());
+      presetTweensRef.current = [];
+      resumeTweenRef.current?.kill();
+      resumeTweenRef.current = null;
+      resumeScrollViewRef.current = null;
+      presetActiveRef.current = false;
       controls.dispose();
       composer.dispose();
       renderer.dispose();
@@ -846,7 +925,54 @@ export default function TwinScene({
       hubGroupsRef.current = [];
       zoneMaterialsRef.current = {};
     };
-  }, [plan, solution, overlay, frame, presets, onInspect, onPhaseChange]);
+  }, [plan, solution, overlay, frame, presets, onInspect, onPhaseChange, onScrollView]);
+
+  useEffect(() => {
+    const camera = cameraRef.current;
+    const mount = mountRef.current;
+    if (!camera || !mount) return;
+    const motion = { shift: appliedShiftRef.current };
+    const tween = gsap.to(motion, {
+      shift: modelShift,
+      duration: 0.35,
+      ease: "power2.out",
+      onUpdate: () => {
+        appliedShiftRef.current = motion.shift;
+        const width = mount.clientWidth;
+        const height = mount.clientHeight;
+        const shift = window.matchMedia("(max-width: 860px)").matches ? 0 : motion.shift;
+        if (shift) camera.setViewOffset(width, height, -Math.round(width * shift), 0, width, height);
+        else camera.clearViewOffset();
+        camera.updateProjectionMatrix();
+      },
+    });
+    return () => {
+      tween.kill();
+    };
+  }, [modelShift]);
+
+  useEffect(() => {
+    modelViewRef.current = modelView;
+    const controls = controlsRef.current;
+    const canvas = mountRef.current?.querySelector<HTMLCanvasElement>("canvas.twin-canvas");
+    const mobile = window.matchMedia("(max-width: 860px)").matches;
+    if (controls) controls.enabled = !mobile || modelView;
+    if (canvas) canvas.style.touchAction = mobile && !modelView ? "pan-y" : "none";
+  }, [modelView]);
+
+  useEffect(() => {
+    const camera = cameraRef.current;
+    if (!camera) return;
+    const tween = gsap.to(camera, {
+      zoom: zoomLevel,
+      duration: 0.25,
+      ease: "power2.out",
+      onUpdate: () => camera.updateProjectionMatrix(),
+    });
+    return () => {
+      tween.kill();
+    };
+  }, [zoomLevel]);
 
   useEffect(() => {
     if (zoneGroupRef.current) zoneGroupRef.current.visible = showZones;
@@ -873,9 +999,33 @@ export default function TwinScene({
     const camera = cameraRef.current;
     const controls = controlsRef.current;
     if (!camera || !controls || preset.token === 0) return;
+    if (preset.id === "reset") {
+      resumeScrollViewRef.current?.();
+      return;
+    }
+    presetTweensRef.current.forEach((tween) => tween.kill());
+    presetTweensRef.current = [];
+    resumeTweenRef.current?.kill();
+    resumeTweenRef.current = null;
+    presetActiveRef.current = true;
     const target = presets[preset.id];
-    gsap.to(camera.position, { x: target.position[0], y: target.position[1], z: target.position[2], duration: 0.8, ease: "power3.inOut", overwrite: true });
-    gsap.to(controls.target, { x: target.target[0], y: target.target[1], z: target.target[2], duration: 0.8, ease: "power3.inOut", overwrite: true });
+    presetTweensRef.current = [
+      gsap.to(camera.position, { x: target.position[0], y: target.position[1], z: target.position[2], duration: 0.9, ease: "power3.inOut" }),
+      gsap.to(controls.target, { x: target.target[0], y: target.target[1], z: target.target[2], duration: 0.9, ease: "power3.inOut" }),
+    ];
+    const groups = preset.id === "zone1"
+      ? hubGroupsRef.current.slice(0, 1)
+      : preset.id === "zone2"
+        ? hubGroupsRef.current.slice(1, 2)
+        : hubGroupsRef.current;
+    groups.forEach((group, index) => {
+      gsap.killTweensOf(group.scale);
+      gsap.fromTo(
+        group.scale,
+        { x: 0.82, y: 0.82, z: 0.82 },
+        { x: 1, y: 1, z: 1, duration: 0.75, delay: 0.12 + index * 0.08, ease: "back.out(2)" },
+      );
+    });
   }, [preset, presets]);
 
   useEffect(() => {
@@ -901,7 +1051,7 @@ export default function TwinScene({
     });
   }, [optimizeSignal]);
 
-  return <div ref={mountRef} className="scene-mount" aria-label="ResPlan procedural BIM digital twin" />;
+  return <div ref={mountRef} className="scene-mount" aria-label="Interactive floor plan model" />;
 }
 
 function length2(a: Vec2, b: Vec2) {
