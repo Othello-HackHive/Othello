@@ -202,11 +202,14 @@ def run_plan(
     partitioner: Callable | None = None,
     optimizer: Callable | None = None,
     checker: Callable = safe_checker,
+    progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> RunOutcome:
     """Run one plan from start to finish.  Never raises for a plan-level problem.
 
     ``source`` is a plan file path, or an already-built ``FloorPlan``.
-    The keyword arguments let tests (and later the API) swap in other pieces.
+    The keyword arguments let tests (and the API) swap in other pieces.
+    ``progress`` is called with a small dictionary at each step (see ``PROGRESS_STAGES``);
+    a progress function that fails is logged and ignored, never allowed to stop the run.
     """
     config = cfg or SolverConfig()
     started = time.monotonic()
@@ -225,6 +228,8 @@ def run_plan(
     plan: Any = None
     stage = "load"
     with run_logger(outcome.plan_id, paths["log"], console=console) as log:
+        emit = _make_emitter(progress, started, log)
+        emit("started", "Run started")
         try:
             log_settings(log, config)
             plan = (
@@ -243,6 +248,13 @@ def run_plan(
             )
             for repair in plan.repairs:
                 log.info("repair: %s", repair)
+            emit(
+                "loaded",
+                f"Plan loaded: {len(plan.rooms)} rooms, {len(plan.nodes)} nodes",
+                plan_id=outcome.plan_id,
+                rooms=len(plan.rooms),
+                nodes=len(plan.nodes),
+            )
 
             stage = "solve"
             _solve_and_write(
@@ -256,17 +268,76 @@ def run_plan(
                 partitioner,
                 optimizer,
                 checker,
+                emit,
             )
         except Exception as problem:  # noqa: BLE001  every plan-level problem becomes a failure note
             _record_failure(problem, plan, config, outcome, paths, log, stage, picture)
         outcome.runtime_s = time.monotonic() - started
         log.info("finished: %s in %.2f s", outcome.status, outcome.runtime_s)
+        emit(
+            "done",
+            _done_message(outcome),
+            status=outcome.status,
+            hubs=outcome.hubs,
+            J=outcome.metrics.get("J"),
+            code=outcome.failure.code if outcome.failure else None,
+        )
     outcome.files["log"] = paths["log"]
     return outcome
 
 
+PROGRESS_STAGES = (
+    "started",
+    "loaded",
+    "bound",
+    "searching",
+    "checking",
+    "writing",
+    "done",
+)
+
+
+def _make_emitter(progress, started, log):
+    """One function that reports a step; a broken listener never stops the run."""
+
+    def emit(stage: str, message: str, **data: Any) -> None:
+        if progress is None:
+            return
+        try:
+            progress(
+                {
+                    "stage": stage,
+                    "message": message,
+                    "elapsed_s": round(time.monotonic() - started, 2),
+                    **data,
+                }
+            )
+        except Exception as problem:  # noqa: BLE001  a listener must never be able to break a run
+            log.warning("progress listener failed: %s", problem)
+
+    return emit
+
+
+def _done_message(outcome: RunOutcome) -> str:
+    if outcome.status == "ok":
+        return f"Done: a checked design with {outcome.hubs} hub(s) was found"
+    if outcome.failure is not None:
+        return f"Done: no design ({outcome.failure.message})"
+    return f"Done: {outcome.status}"
+
+
 def _solve_and_write(
-    plan, config, outcome, paths, log, started, picture, partitioner, optimizer, checker
+    plan,
+    config,
+    outcome,
+    paths,
+    log,
+    started,
+    picture,
+    partitioner,
+    optimizer,
+    checker,
+    emit,
 ) -> None:
     if partitioner is None or optimizer is None:
         from othello.solver import optimize_partitions
@@ -280,6 +351,7 @@ def _solve_and_write(
     lower_bound = hub_lower_bound(plan, config)
     outcome.lower_bound = lower_bound
     log.info("hub lower bound: %d", lower_bound)
+    emit("bound", f"At least {lower_bound} hub(s) are needed", lower_bound=lower_bound)
     too_big = _too_big_room(plan, config)
     if too_big:
         raise NoDesignFoundError(too_big, notes=[too_big])
@@ -295,6 +367,12 @@ def _solve_and_write(
             notes=["time budget used up in setup"],
         )
     log.info("hub counts tried: %s", sorted(batches))
+    emit(
+        "searching",
+        f"Searching for the best cable design (up to {budget:g} s)",
+        hub_counts=sorted(batches),
+        budget_s=budget,
+    )
 
     result = optimizer(
         plan, batches, config, checker, None, search_deadline, lower_bound
@@ -322,6 +400,7 @@ def _solve_and_write(
             notes=list(outcome.notes),
         )
 
+    emit("checking", "Search finished; checking the design once more")
     design = coerce_design(result.design)
     validation = checker(plan, design, config)  # final, independent re-check
     if not validation.valid or validation.metrics is None:
@@ -337,6 +416,7 @@ def _solve_and_write(
         f"{result.partitions_considered} partitions and {result.configurations_considered} configurations checked"
     )
     runtime = time.monotonic() - started
+    emit("writing", "Writing the result files")
     write_official_json(plan, design, paths["official"], config)
     outcome.files["official"] = paths["official"]
     write_overlay_json(
