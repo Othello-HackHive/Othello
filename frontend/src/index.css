@@ -320,6 +320,18 @@ button {
   border-color: rgba(100, 210, 255, 0.5);
 }
 
+.violation-label {
+  padding: 4px 6px;
+  color: #ff9d94;
+  border: 1px solid rgba(255, 59, 48, 0.6);
+  border-radius: 2px;
+  background: rgba(40, 8, 8, 0.82);
+  font: 600 7px/1 "JetBrains Mono", monospace;
+  letter-spacing: 0.14em;
+  box-shadow: 0 0 16px rgba(255, 59, 48, 0.35);
+  animation: statusPulse 1s ease-in-out infinite;
+}
+
 .story-panel {
   position: absolute;
   z-index: 8;
@@ -1342,6 +1354,98 @@ button {
   border-color: rgba(255, 255, 255, 0.18);
 }
 
+.result-loader {
+  display: grid;
+  grid-template-columns: auto 1fr 1fr auto;
+  gap: 8px;
+  align-items: stretch;
+  margin-top: 10px;
+  padding: 8px;
+  border: 1px dashed rgba(125, 211, 252, 0.28);
+  border-radius: 3px;
+  background: rgba(8, 16, 28, 0.4);
+}
+
+.loader-title {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  padding-right: 6px;
+  border-right: 1px solid rgba(125, 211, 252, 0.2);
+  color: #7dd3fc;
+  font: 600 8px/1.3 "JetBrains Mono", monospace;
+  letter-spacing: 0.14em;
+}
+
+.loader-title small {
+  color: #4e6a80;
+  font: 400 6px/1 "JetBrains Mono", monospace;
+  letter-spacing: 0.1em;
+}
+
+.result-loader .plan-chip {
+  grid-column: span 1;
+}
+
+.result-loader .plan-chip.active {
+  border-color: rgba(125, 211, 252, 0.6);
+  background: rgba(125, 211, 252, 0.12);
+}
+
+.result-loader .plan-chip.active svg {
+  color: #7dd3fc;
+}
+
+.loader-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 9px;
+  color: #ff8f84;
+  border: 1px solid rgba(255, 143, 132, 0.3);
+  border-radius: 2px;
+  background: rgba(238, 49, 36, 0.08);
+  font: 600 7px/1 "JetBrains Mono", monospace;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+}
+
+.loader-clear:hover {
+  background: rgba(238, 49, 36, 0.2);
+}
+
+.source-line {
+  padding: 7px 0 0;
+  border-bottom: 1px solid rgba(124, 144, 161, 0.16);
+  color: #56636e;
+  font: 500 6px/1.5 "JetBrains Mono", monospace;
+  letter-spacing: 0.1em;
+  text-align: center;
+}
+
+.source-line:empty {
+  display: none;
+}
+
+.check-row.na > svg:first-child {
+  padding: 2px;
+  color: #6b7985;
+  border-radius: 50%;
+  background: #2a3540;
+}
+
+.check-row.na strong {
+  color: #6b7985;
+}
+
+.validation-badge.fail {
+  color: #ff8f84;
+  border-color: rgba(255, 143, 132, 0.35);
+  background: rgba(238, 49, 36, 0.14);
+}
+
 .drop-overlay {
   position: fixed;
   z-index: 90;
@@ -1633,6 +1737,16 @@ button {
     max-height: 33vh;
     overflow: auto;
     margin-top: 18px;
+  }
+
+  .result-loader {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .loader-title {
+    border-right: 0;
+    border-bottom: 1px solid rgba(125, 211, 252, 0.2);
+    padding: 0 0 6px;
   }
 
   .intro-copy {

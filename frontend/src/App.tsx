@@ -12,6 +12,7 @@ import {
   Layers3,
   LoaderCircle,
   Maximize2,
+  Minus,
   MousePointer2,
   Play,
   Route,
@@ -27,6 +28,7 @@ import {
 import TwinScene, { type CameraPresetId, type Inspection } from "./components/TwinScene";
 import { normalizePlan, PRESET_IDS, PRESET_JSON, type PlanModel } from "./lib/resplan";
 import { optimize, type Solution } from "./lib/optimizer";
+import { parseOverlay, solutionFromOfficial, type OverlayDraw } from "./lib/overlay";
 
 const phases = ["IMPORT", "ZONES", "ROUTE", "AUDIT"];
 
@@ -72,7 +74,12 @@ export default function App() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [official, setOfficial] = useState<{ text: string; data: Record<string, unknown>; name: string } | null>(null);
+  const [overlayDraw, setOverlayDraw] = useState<OverlayDraw | null>(null);
+  const [resultDismissed, setResultDismissed] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const resultInput = useRef<HTMLInputElement>(null);
+  const overlayInput = useRef<HTMLInputElement>(null);
 
   const parsed = useMemo<{ plan: PlanModel | null; error: string | null }>(() => {
     try {
@@ -91,7 +98,24 @@ export default function App() {
 
   const solution = useMemo<Solution | null>(() => (plan ? optimize(plan) : null), [plan]);
 
-  const jsonText = useMemo(() => (solution ? JSON.stringify(solution.output, null, 2) : "{}"), [solution]);
+  /* backend v1: <plan_id>.json (official) + <plan_id>.overlay.json (drawing data) */
+  const resultSolution = useMemo<Solution | null>(() => {
+    if (!plan || !official || resultDismissed) return null;
+    try {
+      return solutionFromOfficial(official.data, official.text, plan, overlayDraw);
+    } catch (error) {
+      setPlanError(error instanceof Error ? `Result rejected — ${error.message}` : "Result rejected");
+      return null;
+    }
+  }, [plan, official, overlayDraw, resultDismissed]);
+
+  const activeSolution = resultSolution ?? solution;
+  const isBackend = resultSolution !== null;
+
+  const jsonText = useMemo(
+    () => (activeSolution ? (activeSolution.rawText ?? JSON.stringify(activeSolution.output, null, 2)) : "{}"),
+    [activeSolution],
+  );
 
   useEffect(() => {
     if (runState !== "solving") return;
@@ -125,9 +149,52 @@ export default function App() {
   const runSolver = () => {
     setSelected(null);
     setStage(-1);
+    setResultDismissed(true);
     setRunState("solving");
     setShowZones(true);
     setShowRoutes(true);
+  };
+
+  const requirePlan = (): PlanModel | null => {
+    if (plan) return plan;
+    setPlanError("Load a floor plan (preset or upload) before loading a backend result");
+    return null;
+  };
+
+  const loadOfficial = async (file: File) => {
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text) as Record<string, unknown>;
+      if (!requirePlan()) return;
+      if (!Array.isArray(data.hubs)) throw new Error("missing hubs[] — expected the official output file");
+      setOfficial({ text, data, name: file.name });
+      setResultDismissed(false);
+      setShowRoutes(true);
+      setPlanError(null);
+    } catch (error) {
+      setPlanError(error instanceof Error ? `Result file invalid — ${error.message}` : "Result file invalid");
+    }
+  };
+
+  const loadOverlayFile = async (file: File) => {
+    try {
+      const data = JSON.parse(await file.text()) as Record<string, unknown>;
+      const target = requirePlan();
+      if (!target) return;
+      const parsed = parseOverlay(data, target);
+      setOverlayDraw(parsed);
+      setWarnings((current) => [...current, ...parsed.warnings]);
+      if (official) setResultDismissed(false);
+      setPlanError(null);
+    } catch (error) {
+      setPlanError(error instanceof Error ? `Overlay file invalid — ${error.message}` : "Overlay file invalid");
+    }
+  };
+
+  const clearResult = () => {
+    setOfficial(null);
+    setOverlayDraw(null);
+    setResultDismissed(true);
   };
 
   const ingestFile = async (file: File) => {
@@ -140,12 +207,12 @@ export default function App() {
   };
 
   const download = () => {
-    if (!solution) return;
+    if (!activeSolution) return;
     const blob = new Blob([jsonText], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `${solution.plan_id.toLowerCase()}-solution.json`;
+    anchor.download = isBackend ? (official?.name ?? "result.json") : `${activeSolution.plan_id.toLowerCase()}-solution.json`;
     anchor.click();
     URL.revokeObjectURL(url);
   };
@@ -159,8 +226,23 @@ export default function App() {
     }
   };
 
-  const metrics = solution?.metrics;
-  const feasible = solution ? solution.checks.every((check) => check.pass) : false;
+  const metrics = activeSolution?.metrics;
+  const ruleChecks = activeSolution?.checks ?? [];
+  const knownChecks = ruleChecks.filter((check) => !check.na);
+  const feasible = knownChecks.length > 0 && knownChecks.every((check) => check.pass);
+  const hasFailures = knownChecks.some((check) => !check.pass);
+  const badgeLabel =
+    runState === "solving"
+      ? "RUNNING"
+      : isBackend
+        ? hasFailures
+          ? "VIOLATIONS"
+          : feasible
+            ? "FEASIBLE"
+            : "RECEIVED"
+        : feasible
+          ? "FEASIBLE"
+          : "IDLE";
 
   return (
     <div className="app-shell">
@@ -199,10 +281,11 @@ export default function App() {
 
       <main id="story" className="story">
         <div className="scene-sticky">
-          {plan && solution ? (
+          {plan && activeSolution ? (
             <TwinScene
               plan={plan}
-              solution={solution}
+              solution={activeSolution}
+              overlay={isBackend ? overlayDraw : null}
               showZones={showZones}
               showRoutes={showRoutes}
               wallHeight={wallSlice / 2.2}
@@ -226,8 +309,8 @@ export default function App() {
             <span className="corner corner-br" />
           </div>
           <div className="view-readout" aria-hidden="true">
+            <span>SCALE {plan ? plan.unitsPerM.toFixed(2) : "—"} UNITS/M</span>
             <span>SECTION CUT {wallSlice.toFixed(2)} M</span>
-            <span>1 UNIT = {(plan ? plan.mPerUnit * 100 : 0).toFixed(2)} CM · {plan ? plan.unitsPerM.toFixed(1) : "0"} U/M</span>
           </div>
         </div>
 
@@ -274,6 +357,51 @@ export default function App() {
                 <small>or click to browse</small>
               </button>
             </div>
+            <div className="result-loader">
+              <span className="loader-title">
+                BACKEND RESULT
+                <small>v1 · FILE-BASED</small>
+              </span>
+              <button type="button" className={official ? "plan-chip active" : "plan-chip"} onClick={() => resultInput.current?.click()}>
+                <FileJson2 size={13} />
+                <span>{official ? official.name : "LOAD <PLAN_ID>.JSON"}</span>
+                <small>official output · slide 8/8</small>
+              </button>
+              <button type="button" className={overlayDraw ? "plan-chip active" : "plan-chip"} onClick={() => overlayInput.current?.click()}>
+                <ScanLine size={13} />
+                <span>{overlayDraw ? "OVERLAY LOADED" : "LOAD <PLAN_ID>.OVERLAY.JSON"}</span>
+                <small>
+                  {overlayDraw ? `schema v${overlayDraw.schemaVersion ?? "?"} · ${overlayDraw.violations.length} violations` : "walls · windows · markers · rules"}
+                </small>
+              </button>
+              {(official || overlayDraw) && (
+                <button type="button" className="loader-clear" onClick={clearResult}>
+                  <X size={12} /> CLEAR
+                </button>
+              )}
+            </div>
+            <input
+              ref={resultInput}
+              type="file"
+              accept="application/json,.json"
+              className="hidden-input"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) void loadOfficial(file);
+                event.target.value = "";
+              }}
+            />
+            <input
+              ref={overlayInput}
+              type="file"
+              accept="application/json,.json"
+              className="hidden-input"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) void loadOverlayFile(file);
+                event.target.value = "";
+              }}
+            />
             <div className="hero-actions">
               <button type="button" className="primary-action" onClick={runSolver} disabled={runState === "solving" || !plan}>
                 {runState === "solving" ? <LoaderCircle size={16} className="spin" /> : <Play size={15} fill="currentColor" />}
@@ -300,7 +428,7 @@ export default function App() {
             </p>
             <div className="chapter-rule">
               <span>H_MIN {metrics?.hubLowerBound ?? "—"}</span>
-              <span>USED {solution?.hubs.length ?? "—"}</span>
+              <span>USED {activeSolution?.hubs.length ?? "—"}</span>
               <span>NODES {metrics?.nodeCount ?? "—"}</span>
             </div>
           </div>
@@ -374,10 +502,23 @@ export default function App() {
             <span className="panel-kicker">OFFICIAL SCORING ENGINE</span>
             <h2>VALIDATION MATRIX</h2>
           </div>
-          <span className={runState === "solving" ? "validation-badge solving" : feasible ? "validation-badge" : "validation-badge warn"}>
+          <span
+            className={
+              runState === "solving"
+                ? "validation-badge solving"
+                : hasFailures
+                  ? "validation-badge fail"
+                  : feasible || isBackend
+                    ? "validation-badge"
+                    : "validation-badge warn"
+            }
+          >
             <i className="led" />
-            {runState === "solving" ? "RUNNING" : feasible ? "FEASIBLE" : "IDLE"}
+            {badgeLabel}
           </span>
+        </div>
+        <div className="source-line">
+          {isBackend ? "BACKEND RESULT · METRICS FROM CHECKER SUMMARY" : "DEMO HEURISTIC · OFFICIAL CHECKER RECOMPUTES J FROM EXPORTED POLYLINES"}
         </div>
 
         <div className="cost-card">
@@ -401,15 +542,15 @@ export default function App() {
             ))}
           </div>
           <div className="cost-extra">
-            <span>HUBS <strong>{solution?.hubs.length ?? 0}</strong> / LOWER BOUND <strong>{metrics?.hubLowerBound ?? 0}</strong></span>
+            <span>HUBS <strong>{activeSolution?.hubs.length ?? 0}</strong> / LOWER BOUND <strong>{metrics?.hubLowerBound ?? 0}</strong></span>
             <span>AREA GAP |A₁−A₂| <strong>{metrics ? `${metrics.areaGap.toFixed(1)} m²` : "—"}</strong></span>
           </div>
         </div>
 
         <div className="solver-status">
           <div className="solver-status-head">
-            <span>{runState === "solving" ? "SOLVER PASS" : runState === "verified" ? "LAST SOLVE" : "AWAITING RUN"}</span>
-            <strong>{runState === "solving" ? `${Math.min(stage + 1, solverStages.length)}/${solverStages.length}` : `ITER ${solution?.iterations ?? 0}`}</strong>
+            <span>{runState === "solving" ? "SOLVER PASS" : isBackend ? "BACKEND RESULT" : runState === "verified" ? "LAST SOLVE" : "AWAITING RUN"}</span>
+            <strong>{runState === "solving" ? `${Math.min(stage + 1, solverStages.length)}/${solverStages.length}` : isBackend ? (official?.name ?? "RESULT") : `ITER ${activeSolution?.iterations ?? 0}`}</strong>
           </div>
           <ul className={runState === "solving" ? "stage-log live" : "stage-log"}>
             {solverStages.map((label, index) => (
@@ -421,9 +562,9 @@ export default function App() {
         </div>
 
         <div className="checks">
-          {(solution?.checks ?? []).map((check) => (
-            <div key={check.id} className={check.pass ? "check-row pass" : "check-row fail"}>
-              {check.pass ? <Check size={14} /> : <X size={14} />}
+          {(activeSolution?.checks ?? []).map((check) => (
+            <div key={check.id} className={check.na ? "check-row na" : check.pass ? "check-row pass" : "check-row fail"}>
+              {check.na ? <Minus size={14} /> : check.pass ? <Check size={14} /> : <X size={14} />}
               <div><span>{check.label}</span><small>{check.detail}</small></div>
               <strong>{check.value}</strong>
             </div>
@@ -432,7 +573,7 @@ export default function App() {
 
         <div className="load-section">
           <div className="load-head"><span>HUB LOAD / AREA</span><span>≤5 · ≤100 M²</span></div>
-          {(solution?.hubs ?? []).map((hub, index) => (
+          {(activeSolution?.hubs ?? []).map((hub, index) => (
             <div key={hub.hub_id} className="load-row" style={{ ["--lane" as string]: hub.color }}>
               <span>{hub.hub_id}</span>
               <i>
@@ -522,12 +663,15 @@ export default function App() {
         <header>
           <div className="drawer-title">
             <Braces size={15} />
-            <span>OFFICIAL OUTPUT · SLIDE 8/8</span>
-            <code>{solution ? `${solution.plan_id.toLowerCase()}-solution.json` : "awaiting-plan"}</code>
+            <span>{isBackend ? "BACKEND OUTPUT · VERBATIM FILE" : "DEMO OUTPUT · SLIDE 8/8 SHAPE"}</span>
+            <code>{isBackend ? (official?.name ?? "result.json") : activeSolution ? `${activeSolution.plan_id.toLowerCase()}-solution.json` : "awaiting-plan"}</code>
           </div>
           <div className="drawer-scores">
-            <span className={feasible ? "pill ok" : "pill bad"}><i className="led" />{feasible ? "ALL 6 RULES PASS" : "RULES PENDING"}</span>
-            <span className="pill">H {solution?.hubs.length ?? 0}</span>
+            <span className={isBackend ? "pill ok" : "pill"}>{isBackend ? "CHECKER-AUTHORITATIVE" : "DEMO ONLY"}</span>
+            <span className={hasFailures ? "pill bad" : knownChecks.length ? "pill ok" : "pill"}>
+              <i className="led" />{hasFailures ? `${knownChecks.filter((c) => !c.pass).length} RULE(S) FAIL` : knownChecks.length ? "ALL RULES PASS" : "AWAITING CHECKER"}
+            </span>
+            <span className="pill">H {activeSolution?.hubs.length ?? 0}</span>
             <span className="pill">L {metrics ? metrics.L.toFixed(2) : "—"} M</span>
             <span className="pill ok">J {metrics ? metrics.J.toFixed(2) : "—"}</span>
           </div>

@@ -12,6 +12,7 @@ import {
 } from "three-stdlib";
 import type { PlanModel, Vec2 } from "../lib/resplan";
 import type { Solution } from "../lib/optimizer";
+import type { OverlayDraw } from "../lib/overlay";
 
 gsap.registerPlugin(ScrollTrigger);
 
@@ -31,6 +32,7 @@ export type CameraPresetRequest = { id: CameraPresetId; token: number };
 type TwinSceneProps = {
   plan: PlanModel;
   solution: Solution;
+  overlay: OverlayDraw | null;
   showZones: boolean;
   showRoutes: boolean;
   wallHeight: number;
@@ -107,6 +109,7 @@ type Pulse = { meshes: THREE.Mesh[]; points: THREE.Vector3[]; lengths: number[];
 export default function TwinScene({
   plan,
   solution,
+  overlay,
   showZones,
   showRoutes,
   wallHeight,
@@ -400,33 +403,48 @@ export default function TwinScene({
       wallParts.push(clearance);
     };
 
-    edges.forEach(({ a, b }) => {
-      const doorSpans = plan.doors
-        .map((door) => {
-          const doorHalf = door.widthM / 2;
-          const along = ((door.center[0] - a[0]) * (b[0] - a[0]) + (door.center[1] - a[1]) * (b[1] - a[1])) / (length2(a, b) || 1);
-          if (along < -0.01 || along > 1.01) return null;
-          const perp = Math.abs(distancePointSegment(door.center, a, b));
-          if (perp > 0.4) return null;
-          const margin = Math.min(doorHalf + 0.08, 0.7);
-          return [Math.max(0, along - margin / Math.max(Math.hypot(b[0] - a[0], b[1] - a[1]), 0.001)), Math.min(1, along + margin / Math.max(Math.hypot(b[0] - a[0], b[1] - a[1]), 0.001))] as [number, number];
-        })
-        .filter(Boolean) as Array<[number, number]>;
+    if (overlay?.walls?.length) {
+      /* backend overlay owns the wall geometry (gaps already carved) */
+      overlay.walls.forEach((run) => addWallRun(run[0], run[run.length - 1]));
+      overlay.openings.forEach((opening) => addThreshold(opening.from, opening.to));
+    } else {
+      edges.forEach(({ a, b }) => {
+        const doorSpans = plan.doors
+          .map((door) => {
+            const doorHalf = door.widthM / 2;
+            const along = ((door.center[0] - a[0]) * (b[0] - a[0]) + (door.center[1] - a[1]) * (b[1] - a[1])) / (length2(a, b) || 1);
+            if (along < -0.01 || along > 1.01) return null;
+            const perp = Math.abs(distancePointSegment(door.center, a, b));
+            if (perp > 0.4) return null;
+            const margin = Math.min(doorHalf + 0.08, 0.7);
+            return [Math.max(0, along - margin / Math.max(Math.hypot(b[0] - a[0], b[1] - a[1]), 0.001)), Math.min(1, along + margin / Math.max(Math.hypot(b[0] - a[0], b[1] - a[1]), 0.001))] as [number, number];
+          })
+          .filter(Boolean) as Array<[number, number]>;
 
-      if (!doorSpans.length) {
-        addWallRun(a, b);
-        return;
-      }
-      doorSpans.sort((p, q) => p[0] - q[0]);
-      let cursor = 0;
-      doorSpans.forEach(([start, end]) => {
-        if (start > cursor) addWallRun(lerpVec(a, b, cursor), lerpVec(a, b, start));
-        addThreshold(lerpVec(a, b, start), lerpVec(a, b, end));
-        cursor = end;
+        if (!doorSpans.length) {
+          addWallRun(a, b);
+          return;
+        }
+        doorSpans.sort((p, q) => p[0] - q[0]);
+        let cursor = 0;
+        doorSpans.forEach(([start, end]) => {
+          if (start > cursor) addWallRun(lerpVec(a, b, cursor), lerpVec(a, b, start));
+          addThreshold(lerpVec(a, b, start), lerpVec(a, b, end));
+          cursor = end;
+        });
+        if (cursor < 1) addWallRun(lerpVec(a, b, cursor), b);
       });
-      if (cursor < 1) addWallRun(lerpVec(a, b, cursor), b);
-    });
+    }
     wallPartsRef.current = wallParts;
+
+    /* backend overlay doors override the inferred ones for bracket placement */
+    const doorsPerRoom: Record<string, number> = {};
+    const countDoors = (a: string, b: string) => {
+      doorsPerRoom[a] = (doorsPerRoom[a] ?? 0) + 1;
+      doorsPerRoom[b] = (doorsPerRoom[b] ?? 0) + 1;
+    };
+    if (overlay?.openings.length) overlay.openings.forEach((opening) => countDoors(opening.a, opening.b));
+    else plan.doors.forEach((door) => countDoors(door.a, door.b));
 
     /* --------------------------------------------------- hardware props */
     const hubMaterial = new THREE.MeshPhysicalMaterial({ color: "#8a9aab", metalness: 0.88, roughness: 0.22, clearcoat: 0.9, clearcoatRoughness: 0.1 });
@@ -570,9 +588,13 @@ export default function TwinScene({
 
       /* single-door dead ends get visible dual-slot brackets */
       plan.rooms
-        .filter((room) => room.eligible && (plan.doorsOfRoom[room.id]?.length ?? 0) === 1)
+        .filter((room) => room.eligible && (doorsPerRoom[room.id] ?? 0) === 1)
         .forEach((room) => {
-          const door = plan.doorsOfRoom[room.id][0];
+          const overlayDoor = overlay?.openings.find((opening) => opening.a === room.id || opening.b === room.id);
+          const door = overlayDoor
+            ? { center: [(overlayDoor.from[0] + overlayDoor.to[0]) / 2, (overlayDoor.from[1] + overlayDoor.to[1]) / 2] as Vec2, tangent: [overlayDoor.to[0] - overlayDoor.from[0], overlayDoor.to[1] - overlayDoor.from[1]] as Vec2 }
+            : plan.doorsOfRoom[room.id]?.[0];
+          if (!door) return;
           const bracket = new THREE.Group();
           bracket.position.copy(frame.toWorld(door.center, 0));
           bracket.rotation.y = Math.atan2(door.tangent[0], door.tangent[1]);
@@ -616,6 +638,99 @@ export default function TwinScene({
         pulses.push({ meshes, points, lengths, total, speed: 2.3 + hubIdx * 0.2 });
       }
     });
+
+    /* --------------------------------------------- backend overlay extras */
+    const violationPulses: THREE.Mesh[] = [];
+    if (overlay) {
+      const windowMaterial = new THREE.MeshBasicMaterial({
+        color: new THREE.Color(0.55, 1.9, 3.0),
+        transparent: true,
+        opacity: 0.4,
+        side: THREE.DoubleSide,
+        toneMapped: false,
+        depthWrite: false,
+      });
+      overlay.windows.forEach((polygon) => {
+        const shape = new THREE.Shape(polygon.map(([x, y]) => new THREE.Vector2(x, y)));
+        const glass = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: 0.02, bevelEnabled: false }), windowMaterial);
+        glass.geometry.rotateX(Math.PI / 2);
+        glass.position.copy(frame.toWorld([0, 0], 0)).setY(1.1);
+        glass.userData.inspection = {
+          id: "WINDOW",
+          title: "WINDOW",
+          type: "door",
+          zone: "EXCLUDED",
+          detail: "no cable crossing allowed",
+          coords: "FIXED INPUT",
+        } satisfies Inspection;
+        architectureGroup.add(glass);
+        pickables.push(glass);
+      });
+
+      const redMaterial = new THREE.MeshBasicMaterial({ color: new THREE.Color(3.2, 0.14, 0.1), toneMapped: false });
+      const redSoftMaterial = new THREE.MeshBasicMaterial({ color: new THREE.Color(1.6, 0.12, 0.08), transparent: true, opacity: 0.45, toneMapped: false, side: THREE.DoubleSide });
+      overlay.violations.forEach((violation) => {
+        if (violation.kind === "point" && violation.pts[0]) {
+          const marker = new THREE.Mesh(new THREE.SphereGeometry(0.14, 12, 10), redMaterial);
+          marker.position.copy(frame.toWorld(violation.pts[0], 0.3));
+          architectureGroup.add(marker);
+          const ring = new THREE.Mesh(new THREE.RingGeometry(0.18, 0.26, 32), redSoftMaterial);
+          ring.rotation.x = -Math.PI / 2;
+          ring.position.copy(frame.toWorld(violation.pts[0], 0.09));
+          architectureGroup.add(ring);
+          violationPulses.push(ring);
+          const label = makeLabel("VIOLATION", "violation-label");
+          label.position.copy(frame.toWorld(violation.pts[0], 0.75));
+          architectureGroup.add(label);
+        } else if (violation.kind === "polyline" && violation.pts.length >= 2) {
+          for (let i = 1; i < violation.pts.length; i += 1) {
+            const start = frame.toWorld(violation.pts[i - 1], 0.18);
+            const end = frame.toWorld(violation.pts[i], 0.18);
+            const length = start.distanceTo(end);
+            if (length < 1e-3) continue;
+            const horizontal = Math.abs(end.x - start.x) >= Math.abs(end.z - start.z);
+            const run = new THREE.Mesh(new THREE.BoxGeometry(horizontal ? length : 0.07, 0.05, horizontal ? 0.07 : length), redMaterial);
+            run.position.copy(start.clone().add(end).multiplyScalar(0.5));
+            architectureGroup.add(run);
+          }
+        } else if (violation.kind === "polygon" && violation.pts.length >= 3) {
+          const shape = new THREE.Shape(violation.pts.map(([x, y]) => new THREE.Vector2(x, y)));
+          const area = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: 0.04, bevelEnabled: false }), redSoftMaterial);
+          area.geometry.rotateX(Math.PI / 2);
+          area.position.copy(frame.toWorld([0, 0], 0)).setY(0.06);
+          architectureGroup.add(area);
+        }
+      });
+
+      const legMaterial = new THREE.LineBasicMaterial({ color: "#9fb4c8", transparent: true, opacity: 0.55 });
+      overlay.legs.forEach((points) => {
+        const line = new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints(points.map(([x, y]) => frame.toWorld([x, y], 0.2))),
+          legMaterial,
+        );
+        routeGroup.add(line);
+      });
+
+      const addMarker = (point: Vec2, material: THREE.Material, geometry: THREE.BufferGeometry) => {
+        const marker = new THREE.Mesh(geometry, material);
+        marker.position.copy(frame.toWorld(point, 0.24));
+        routeGroup.add(marker);
+      };
+      const crossingGeometry = new THREE.OctahedronGeometry(0.1);
+      const crossingMaterial = new THREE.MeshBasicMaterial({ color: new THREE.Color(4.2, 0.4, 0.3), toneMapped: false });
+      overlay.crossings.forEach((point) => addMarker(point, crossingMaterial, crossingGeometry));
+      const overlapMaterial = new THREE.MeshBasicMaterial({ color: new THREE.Color(4.0, 1.6, 0.15), toneMapped: false });
+      const overlapGeometry = new THREE.TorusGeometry(0.1, 0.032, 8, 20);
+      overlay.overlaps.forEach((point) => {
+        const marker = new THREE.Mesh(overlapGeometry, overlapMaterial);
+        marker.rotation.x = -Math.PI / 2;
+        marker.position.copy(frame.toWorld(point, 0.1));
+        routeGroup.add(marker);
+      });
+      const bendMaterial = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.7, 2.2, 3.2), toneMapped: false });
+      const bendGeometry = new THREE.SphereGeometry(0.05, 8, 8);
+      overlay.bends.forEach((point) => addMarker(point, bendMaterial, bendGeometry));
+    }
 
     /* -------------------------------------------------------- raycasting */
     const raycaster = new THREE.Raycaster();
@@ -675,6 +790,12 @@ export default function TwinScene({
         const ring = group.children.find((child) => child.userData.pulseRing);
         if (ring) ring.scale.setScalar(1 + Math.sin(elapsed * 2.6 + index) * 0.085);
       });
+      violationPulses.forEach((ring, index) => {
+        const pulse = 1 + Math.sin(elapsed * 5 + index) * 0.28;
+        ring.scale.setScalar(pulse);
+        const material = ring.material as THREE.MeshBasicMaterial;
+        material.opacity = 0.55 - (pulse - 1) * 0.8;
+      });
       pulses.forEach((pulse) => {
         pulse.meshes.forEach((mesh, index) => {
           const position = pointOnPath(pulse, elapsed * pulse.speed - index * 0.16);
@@ -725,7 +846,7 @@ export default function TwinScene({
       hubGroupsRef.current = [];
       zoneMaterialsRef.current = {};
     };
-  }, [plan, solution, frame, presets, onInspect, onPhaseChange]);
+  }, [plan, solution, overlay, frame, presets, onInspect, onPhaseChange]);
 
   useEffect(() => {
     if (zoneGroupRef.current) zoneGroupRef.current.visible = showZones;

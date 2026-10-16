@@ -16,6 +16,8 @@ export interface Room {
   centroid: Vec2;
   node: Vec2;
   clearance: number;
+  /** "given" = fixed input from the plan file; "assumed" = solver fallback */
+  nodeSource: "given" | "assumed";
   hubId?: string;
 }
 
@@ -44,7 +46,8 @@ export interface PlanModel {
   outerPolygon: Vec2[];
 }
 
-const ELIGIBLE_TOKENS = ["living", "bedroom", "kitchen", "storage", "dining", "laundry", "utility"];
+/* Slide 2: eligible room types are ONLY living, bedroom, kitchen, storage. */
+const ELIGIBLE_TOKENS = ["living", "bedroom", "kitchen", "storage"];
 const EXCLUDED_TOKENS = ["bath", "balcony", "stair", "garden", "pool", "parking", "land", "entrance", "foyer", "hall", "corridor", "closet", "terrace", "garage"];
 
 const num = (value: unknown): number | null =>
@@ -191,18 +194,18 @@ const classify = (label: string) => {
   const clean = label.toLowerCase().replace(/[^a-z]/g, "");
   if (EXCLUDED_TOKENS.some((token) => clean.startsWith(token) || clean.includes(`${token}room`))) return false;
   if (ELIGIBLE_TOKENS.some((token) => clean.includes(token))) return true;
-  return /^(bed|living|kitch|storage|dining)/.test(clean);
+  return /^(bed|living|kitch|storage)/.test(clean);
 };
 
-function collectRoomEntries(raw: unknown): Array<{ id: string; label: string; ring: Vec2[] }> {
-  const out: Array<{ id: string; label: string; ring: Vec2[] }> = [];
+function collectRoomEntries(raw: unknown): Array<{ id: string; label: string; ring: Vec2[]; raw: unknown }> {
+  const out: Array<{ id: string; label: string; ring: Vec2[]; raw: unknown }> = [];
   const push = (id: string, entry: unknown) => {
     const ring = ringFrom(entry);
     if (!ring) return;
     const label =
       (typeof entry === "object" && entry && ((entry as { label?: unknown }).label ?? (entry as { type?: unknown }).type ?? (entry as { name?: unknown }).name)) as string
       || id;
-    out.push({ id, label: String(label), ring });
+    out.push({ id, label: String(label), ring, raw: entry });
   };
   if (raw && typeof raw === "object") {
     if (Array.isArray(raw)) raw.forEach((entry, index) => push(String((entry as { id?: string })?.id ?? `R${index + 1}`), entry));
@@ -243,36 +246,116 @@ export interface NormalizeResult {
   warnings: string[];
 }
 
+interface RawNodePoint {
+  key?: string;
+  point: Vec2;
+}
+
+/** Fixed node inputs (slide 2): one per eligible room, ≥ 0.5 m from walls, given by the plan. */
+function extractNodePoints(json: Record<string, unknown>): RawNodePoint[] {
+  const out: RawNodePoint[] = [];
+  const buckets: unknown[] = [json.nodes, json.fixed_points, json.node_points, json.points].filter((b) => b != null);
+  buckets.forEach((bucket) => {
+    values(bucket).forEach((entry) => {
+      let point: Vec2 | null = null;
+      let key: string | undefined;
+      if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+        const bag = entry as Record<string, unknown>;
+        key = String(bag.room_id ?? bag.room ?? bag.label ?? bag.id ?? "");
+        if (!key) key = undefined;
+        point = toVec(bag.point ?? bag.location ?? bag.node ?? bag.position) ?? toVec([bag.x, bag.y]);
+      } else {
+        point = toVec(entry);
+      }
+      if (point) out.push({ key, point });
+    });
+  });
+  return out;
+}
+
 export function normalizePlan(json: Record<string, unknown>, fallbackName = "UPLOADED_PLAN"): NormalizeResult {
   const warnings: string[] = [];
 
-  /* ---- scale law ---- */
-  const declared = num(json.scale ?? json.units_per_metre ?? json.m_per_unit);
+  /* ---- scale law (slide 4) ----
+   * unitsPerMetre = sqrt(plan.area / plan.inner.area)   [drawing units per metre]
+   *   e.g. 36,000 u² / 110 m² → sqrt(327.3) = 18.09 u/m → 200 units = 11.06 m
+   * So:   metres = units / unitsPerMetre.
+   * plan.area is in drawing units², plan.inner.area is in real m².
+   * (plan.net_area is intentionally ignored — it is 0 in 32% of plans.) */
+  const declaredUnitsPerM = num(json.scale ?? json.units_per_metre);
+  const declaredMPerUnit = num(json.m_per_unit ?? json.metres_per_unit ?? json.meters_per_unit);
   const planArea = num(json.area);
   const innerArea = num((json.inner as { area?: unknown } | undefined)?.area ?? json.inner_area);
   let mPerUnit: number;
-  if (declared && Number.isFinite(declared) && declared > 0) mPerUnit = declared;
+  if (declaredMPerUnit && Number.isFinite(declaredMPerUnit) && declaredMPerUnit > 0) mPerUnit = declaredMPerUnit;
+  else if (declaredUnitsPerM && Number.isFinite(declaredUnitsPerM) && declaredUnitsPerM > 0) mPerUnit = 1 / declaredUnitsPerM;
   else if (planArea && innerArea && planArea > 0 && innerArea > 0) mPerUnit = Math.sqrt(innerArea / planArea);
   else {
-    mPerUnit = 0.025;
-    warnings.push("plan.area / plan.inner.area missing — fallback scale 1 unit = 25 mm");
+    mPerUnit = 1 / 18;
+    warnings.push("plan.area / plan.inner.area missing — fallback 18 units/m");
   }
   if (!Number.isFinite(mPerUnit) || mPerUnit <= 0) {
-    mPerUnit = 0.025;
-    warnings.push("scale not finite — fallback applied");
+    mPerUnit = 1 / 18;
+    warnings.push("scale not finite — fallback 18 units/m applied");
   }
-  const toM = (v: number) => v * mPerUnit;
+  const toM = (v: number) => v * mPerUnit; /* metres = units / unitsPerMetre */
 
   /* ---- rooms ---- */
   const entries = collectRoomEntries(json.rooms ?? json.spaces ?? json.labels ?? json.rooms_list);
   if (!entries.length) throw new Error("No room polygons found. Expected plan.rooms / plan.labels with contour rings.");
 
-  const rooms: Room[] = entries.map(({ id, label, ring }) => {
+  const givenNodes = extractNodePoints(json);
+  const normalizeKey = (value: string) => value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const usedNodeKeys = new Set<number>();
+  const toRoomPoint = (unitsPoint: Vec2): Vec2 | null => {
+    const asUnits = [toM(unitsPoint[0]), toM(unitsPoint[1])] as Vec2;
+    return asUnits;
+  };
+
+  const rooms: Room[] = entries.map(({ id, label, ring, raw }) => {
     const polygon = ring.map(([x, y]) => [toM(x), toM(y)] as Vec2);
-    const areaM2 = polygonArea(polygon) * 1;
+    const areaM2 = polygonArea(polygon);
     const type = label.toLowerCase().replace(/\s+/g, "_");
     const eligible = classify(label);
-    const { point, clearance } = interiorPoint(polygon, 0.5);
+
+    /* Node is a FIXED INPUT: take the plan's point, never invent one. */
+    let node: Vec2 | null = null;
+    const rawBag = (raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
+    const perRoom = toVec(rawBag.node ?? rawBag.fixed_point ?? rawBag.point);
+    if (perRoom) node = toRoomPoint(perRoom);
+
+    if (!node) {
+      const matchIndex = givenNodes.findIndex(
+        (candidate, index) =>
+          !usedNodeKeys.has(index) &&
+          candidate.key &&
+          (normalizeKey(candidate.key) === normalizeKey(id) || normalizeKey(candidate.key) === normalizeKey(label)),
+      );
+      if (matchIndex >= 0) {
+        usedNodeKeys.add(matchIndex);
+        node = toRoomPoint(givenNodes[matchIndex].point);
+      }
+    }
+    if (!node) {
+      const matchIndex = givenNodes.findIndex((candidate, index) => !usedNodeKeys.has(index) && !candidate.key && pointInPolygon(toRoomPoint(candidate.point) as Vec2, polygon));
+      if (matchIndex >= 0) {
+        usedNodeKeys.add(matchIndex);
+        node = toRoomPoint(givenNodes[matchIndex].point);
+      }
+    }
+
+    let source: "given" | "assumed";
+    if (!node) {
+      const { point } = interiorPoint(polygon, 0.5);
+      node = point;
+      source = "assumed";
+      if (eligible) warnings.push(`${id}: no fixed node point in file — solver-assumed (clearance ${distanceToPolygon(point, polygon).toFixed(2)} m)`);
+    } else {
+      source = "given";
+      const clearance = distanceToPolygon(node, polygon);
+      if (eligible && clearance < 0.5 - 1e-3) warnings.push(`${id}: given node is ${clearance.toFixed(2)} m from wall (< 0.5 m) — used as-is per fixed input`);
+    }
+
     return {
       id: id.toUpperCase(),
       label,
@@ -281,8 +364,9 @@ export function normalizePlan(json: Record<string, unknown>, fallbackName = "UPL
       polygon,
       areaM2,
       centroid: polygonCentroid(polygon),
-      node: point,
-      clearance,
+      node,
+      clearance: distanceToPolygon(node, polygon),
+      nodeSource: source,
     };
   });
 
@@ -448,6 +532,14 @@ export const PRESET_JSON: Record<string, Record<string, unknown>> = {
       R07: { label: "Bathroom", polygon: rect(340, 228, 420, 300) },
       R08: { label: "Entrance", polygon: rect(420, 228, 480, 300) },
     },
+    nodes: [
+      { room: "R01", point: [70, 60] },
+      { room: "R02", point: [230, 60] },
+      { room: "R03", point: [388, 60] },
+      { room: "R04", point: [70, 228] },
+      { room: "R05", point: [258, 216] },
+      { room: "R06", point: [422, 175] },
+    ],
     openings: {
       doors: [
         opening("R01", "R04", [56, 140], [92, 140]),
@@ -477,6 +569,13 @@ export const PRESET_JSON: Record<string, Record<string, unknown>> = {
       R07: { label: "Entrance", polygon: rect(280, 300, 440, 400) },
       R08: { label: "Balcony", polygon: rect(440, 300, 640, 400) },
     },
+    nodes: [
+      { room: "R01", point: [100, 80] },
+      { room: "R02", point: [360, 60] },
+      { room: "R03", point: [540, 110] },
+      { room: "R04", point: [360, 220] },
+      { room: "R05", point: [70, 250] },
+    ],
     openings: {
       doors: [
         opening("R01", "R02", [280, 40], [280, 100]),
@@ -511,6 +610,16 @@ export const PRESET_JSON: Record<string, Record<string, unknown>> = {
       R11: { label: "Balcony", polygon: rect(440, 360, 600, 480) },
       R12: { label: "Bath 2", polygon: rect(600, 360, 800, 480) },
     },
+    nodes: [
+      { room: "R01", point: [160, 120] },
+      { room: "R02", point: [500, 90] },
+      { room: "R03", point: [660, 90] },
+      { room: "R04", point: [760, 90] },
+      { room: "R05", point: [700, 280] },
+      { room: "R06", point: [500, 280] },
+      { room: "R07", point: [320, 280] },
+      { room: "R08", point: [70, 440] },
+    ],
     openings: {
       doors: [
         opening("R01", "R02", [400, 60], [400, 120]),

@@ -37,6 +37,8 @@ export interface RuleCheck {
   id: string;
   label: string;
   pass: boolean;
+  /** rule state unknown (e.g. backend result without checker summary) */
+  na?: boolean;
   value: string;
   detail: string;
 }
@@ -60,6 +62,10 @@ export interface Solution {
   checks: RuleCheck[];
   iterations: number;
   output: Record<string, unknown>;
+  /** "demo" = client heuristic (display only); "backend" = official output file */
+  source: "demo" | "backend";
+  /** raw official JSON text when source = backend, for verbatim export */
+  rawText?: string;
 }
 
 const ZONE_COLORS = ["#1d4ed8", "#d97706", "#10b981", "#7c3aed", "#e11d48", "#0891b2"];
@@ -652,5 +658,6 @@ export function optimize(plan: PlanModel, hubOverride?: number): Solution {
     checks,
     iterations: 1800 + iterations * 61 + hubs.length * 17,
     output,
+    source: "demo",
   };
 }
