@@ -17,12 +17,21 @@ import time
 from collections import deque
 from typing import Protocol
 
+from othello.io.errors import OthelloError
 from othello.service.config import ServiceConfig
 from othello.service.store import LocalJobStore
 from othello.service.worker import execute_job
 
 log = logging.getLogger("othello.service.launcher")
 POLL_S = 0.25
+
+
+class LaunchError(OthelloError):
+    """The job could not be handed to something that runs it (the service is down or refused)."""
+
+    code = "SERVICE_UNAVAILABLE"
+    stage = "solve"
+    hint = "try again in a moment"
 
 
 class Launcher(Protocol):

@@ -1,0 +1,59 @@
+name: Container image
+
+# Builds the Lambda image on every change that could break it, so a broken Dockerfile is found in the pull
+# request and not during a deploy. It only builds; nothing is pushed anywhere.
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - "src/**"
+      - "pyproject.toml"
+      - ".dockerignore"
+      - ".github/workflows/docker-build.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build the Lambda image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The AWS templates are valid
+        run: |
+          pip install "cfn-lint==1.57.2"
+          cfn-lint infra/template.yaml infra/github-deploy-role.yaml
+
+      - name: Build
+        run: docker build --file infra/Dockerfile --tag othello-lambda .
+
+      - name: The API entry point can be imported from the image
+        run: |
+          docker run --rm --entrypoint python othello-lambda -c \
+            "import othello.service.lambda_handler as h; print(h.handler, h.worker_handler)"
+
+      - name: A job can be solved inside the image
+        run: |
+          docker run --rm --entrypoint python othello-lambda -c "
+          import json, tempfile
+          from pathlib import Path
+          from othello.models import SolverConfig
+          from othello.run import run_plan
+          from othello.service.plan_json import plan_from_json
+          sample = Path('/tmp/one_room.json')
+          sample.write_text(json.dumps({'id': 'IMG', 'area': 64.0,
+              'inner': {'type': 'Polygon', 'coordinates': [[[0,0],[80,0],[80,80],[0,80],[0,0]]]},
+              'living': 'POLYGON ((0 0, 80 0, 80 80, 0 80, 0 0))'}))
+          plan = plan_from_json(sample.read_bytes())
+          outcome = run_plan(plan, tempfile.mkdtemp(), SolverConfig(time_budget_s=8), picture=True)
+          print(outcome.status, outcome.hubs, sorted(outcome.files))
+          assert outcome.status == 'ok' and 'picture' in outcome.files
+          "
