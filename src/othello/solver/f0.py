@@ -7,8 +7,9 @@ import math
 import time
 from typing import Any
 
-from othello.routing import DistanceTable, RoutingCache
+from othello.routing import RoutingCache
 
+from .candidate_tables import candidate_tables
 from .hub_candidates import HubCandidateLimitError, generate_hub_candidates
 from .node_orders import enumerate_visiting_orders
 from .types import F0Result
@@ -120,17 +121,11 @@ def construct_f0_design(
         chosen: dict[str, Any] | None = None
         chosen_coincident = 0
         candidate_pool = candidates.candidates[:3] if _quick else candidates.candidates
-        for candidate in candidate_pool:
+        for candidate, table in candidate_tables(plan, hub_id, territory.node_ids,
+                                                 candidate_pool, config, route_cache, deadline):
             if _expired(deadline):
                 return F0Result("timeout", diagnostics=("F0 deadline expired; no partial design returned",))
-            stops = {hub_id: candidate.point_m}
-            stops.update({node_id: plan.nodes[node_id].point_m for node_id in territory.node_ids})
-            try:
-                table = DistanceTable(plan, stops, config, route_cache, deadline)
-            except ValueError:
-                if _expired(deadline):
-                    return F0Result("timeout", diagnostics=("F0 deadline expired; no partial design returned",))
-                raise
+            stops = table.stops
             if _quick:
                 ordered_nodes = _nearest_node_order(candidate.point_m, tuple(territory.node_ids), plan.nodes)
                 sequences = ((hub_id, *ordered_nodes, hub_id),)

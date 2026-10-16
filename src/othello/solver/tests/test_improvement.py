@@ -185,7 +185,7 @@ def test_route_substitution_is_checked_and_can_improve(monkeypatch):
         return RouteVariant(polyline, LineString(points).length, LineString(points).length,
                             0, 0, (), None, None, ("test",))
 
-    def library(table, source, target, config, deadline):
+    def library(table, source, target, config, deadline, **kwargs):
         if (source, target) == ("H1", "N1"):
             return RouteLibraryResult("ready", (variant([hub, node]),
                                                 variant([hub, (1.0, 2.0), (3.0, 2.0), node])))

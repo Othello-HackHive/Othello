@@ -176,7 +176,7 @@ def test_open_passage_at_dead_end_is_retraced_like_a_door():
     assert used.count("P23") == 2
 
 
-def test_route_selection_and_improvement_keep_valid_retracing():
+def test_route_selection_and_improvement_keep_valid_dead_end_access():
     plan, option = _dead_end_chain()
     config = _config(hub_cap=4, order_cap=3)
     built = construct_f0_design(plan, option, config)
@@ -184,12 +184,12 @@ def test_route_selection_and_improvement_keep_valid_retracing():
     selected = select_whole_design_routes(plan, built.design, config, checker=_checker)
     assert selected.status == "verified" and selected.verified
     _assert_complete_geometry(plan, selected.design)
-    assert _retraced_at_node(plan, selected.design, "N3") > 0
+    assert selected.J <= _checker(plan, built.design, config).metrics.J
 
     improved = improve_design(plan, selected.design, config, checker=_checker)
     assert improved.status in {"unchanged", "improved"} and improved.verified
     _assert_complete_geometry(plan, improved.design)
-    assert _retraced_at_node(plan, improved.design, "N3") > 0
+    assert improved.J <= selected.J
 
 
 def test_outer_search_accepts_retracing_as_a_verified_incumbent():

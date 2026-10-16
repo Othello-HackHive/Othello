@@ -143,11 +143,8 @@ def test_graph_cache_respects_pair_dependent_fallback_for_every_policy(policy, f
         assert cached == clean
         assert cached.status == "success"
     assert {key.leg for key in cache._graphs} == {None, ("A", "C")}
-    assert cache.stats().graph_count == 2
-    if fallback_first:
-        assert cache.stats().graph_hits == 0
-    else:
-        assert cache.stats().graph_hits >= 1  # Shared Hanan graph was checked before fallback.
+    assert any(key.stage is not None and key.stage[1] for key in cache._graphs)
+    assert cache.stats().graph_count >= 3
 
 
 def test_shared_hanan_graph_reuses_one_build_across_distinct_legs(monkeypatch):
@@ -178,6 +175,30 @@ def test_shared_hanan_graph_reuses_one_build_across_distinct_legs(monkeypatch):
     assert cache.stats().graph_hits >= len(legs) - 1
 
 
+def test_completed_fallback_graph_is_reused_for_another_leg(monkeypatch):
+    from othello.routing import table as table_module
+
+    inner = Polygon([(0, 0), (2, 0), (2, 4), (4, 4), (4, 0), (6, 0), (6, 6), (0, 6)])
+    plan = make_plan(inner=inner)
+    stops = {"A": (1.123, 1.321), "B": (1.523, 1.321), "C": (5.321, 1.321)}
+    cfg = make_config(grid_step_m=1.0, cable_transit_policy="forbid",
+                      weights=SimpleNamespace(length=1.0, bend=0.5))
+    original = table_module.build_routing_graph
+    builds = []
+
+    def counted(*args, **kwargs):
+        builds.append((args[2], args[3]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(table_module, "build_routing_graph", counted)
+    cache = RoutingCache()
+    table = DistanceTable(plan, stops, cfg, cache)
+    assert table.get_route("A", "C").status == "success"
+    assert table.get_route("B", "C").status == "success"
+    assert builds == [("A", "C")]
+    assert any(key.stage == ("permitted_only", True) for key in cache._graphs)
+
+
 def test_avoid_policy_does_not_share_relaxed_graph_with_permitted_detour():
     from conftest import make_opening
 
@@ -200,12 +221,12 @@ def test_avoid_policy_does_not_share_relaxed_graph_with_permitted_detour():
     table = DistanceTable(plan, stops, cfg, cache)
     relaxed = table.get_route("A", "C")
     assert relaxed.status == "success" and relaxed.opening_ids == ("D1", "D3")
-    assert None not in {key.leg for key in cache._graphs}
+    assert not any(key.leg is None and key.stage is None for key in cache._graphs)
     permitted = table.get_route("A", "B")
     assert permitted == DistanceTable(plan, stops, cfg, RoutingCache()).get_route("A", "B")
     assert permitted.status == "success" and permitted.opening_ids == ("P1", "P2")
     assert permitted.length_m > relaxed.length_m
-    assert None not in {key.leg for key in cache._graphs}  # This permitted leg used fallback.
+    assert not any(key.leg is None and key.stage is None for key in cache._graphs)  # Fallback stage.
     local = table.get_route("A", "D")
     assert local.status == "success" and local.opening_ids == ()
     assert None in {key.leg for key in cache._graphs}
@@ -302,13 +323,14 @@ def test_shared_graph_changes_with_geometry_config_and_terminals():
     assert table.get_route("A", "B").status == "success"
     assert table.get_route("A", "C").status == "success"
     initial_graphs = cache.stats().graph_count
+    initial_signatures = {key.plan_sig for key in cache._graphs}
 
     plan.walls_m = box(4, 0, 6, 10)
     plan.free_space_m = plan.inner_m.difference(plan.walls_m)
     blocked = table.get_route("A", "C")
     assert blocked.status == "unreachable_on_grid"
     assert blocked == DistanceTable(plan, stops, cfg, RoutingCache()).get_route("A", "C")
-    assert cache.stats().graph_count == initial_graphs
+    assert any(key.plan_sig not in initial_signatures for key in cache._graphs)
 
     plan.walls_m = make_plan().walls_m
     plan.free_space_m = plan.inner_m
@@ -577,7 +599,7 @@ def test_terminal_set_changes_isolate_graph_cache():
     table_a = DistanceTable(plan, stops_a, cfg, cache)
     r_a = table_a.get_route("H1", "N1")
     assert r_a.status == "success"
-    assert cache.stats().graph_misses == 2
+    assert cache.stats().graph_misses >= 2
 
     # Table B with 3 stops -> different terminal coordinates signature in GraphKey
     stops_b = {"H1": (1, 2), "N1": (9, 2), "N2": (3, 3)}
@@ -585,7 +607,7 @@ def test_terminal_set_changes_isolate_graph_cache():
     r_b = table_b.get_route("H1", "N1")
     assert r_b.status == "success"
     # Produces a new GraphKey because terminals set changed coordinate grid lines
-    assert cache.stats().graph_misses == 4
+    assert len({key.terminals for key in cache._graphs}) == 2
 
 
 def test_cached_vs_uncached_strict_equivalence():

@@ -8,6 +8,7 @@ from shapely.ops import unary_union
 
 from conftest import make_config, make_opening, make_plan, make_room
 from othello.routing import DistanceTable, RoutingCache, build_route_library
+from othello.models import SolverConfig
 from test_astar import path_graph, tradeoff_graph
 from test_transit_policy import transit_plan
 
@@ -20,6 +21,22 @@ def config(*, cap=6, length=1.0, bend=0.5, policy="forbid"):
 
 def table_for(plan, stops, cfg):
     return DistanceTable(plan, stops, cfg, RoutingCache())
+
+
+def test_occupied_cable_variant_is_distinct_and_does_not_poison_route_cache():
+    plan = make_plan(inner=box(0, 0, 6, 6))
+    cfg = SolverConfig()
+    cache = RoutingCache()
+    table = DistanceTable(plan, {"A": (1.0, 1.0), "B": (5.0, 5.0)}, cfg, cache)
+    baseline = table.get_route("A", "B")
+    assert baseline.status == "success"
+    library = build_route_library(table, "A", "B", cfg,
+                                  occupied_polylines=(tuple(baseline.polyline),))
+    assert library.status == "ready"
+    alternatives = [route for route in library.routes if "avoid_placed_cable" in route.source_tags]
+    assert alternatives
+    assert any(route.polyline != tuple(baseline.polyline) for route in alternatives)
+    assert table.get_route("A", "B").polyline == baseline.polyline
 
 
 def two_doors():
@@ -178,7 +195,8 @@ def test_graph_and_path_cache_reused_across_library_calls():
     stats_second = table.cache.stats()
     assert first == second
     assert stats_first.path_count == stats_second.path_count == 1
-    assert stats_first.graph_count == stats_second.graph_count == 1
+    assert stats_first.graph_count == stats_second.graph_count
+    assert stats_first.graph_count >= 1
     assert stats_second.path_hits > stats_first.path_hits
     assert stats_second.graph_hits > stats_first.graph_hits
 

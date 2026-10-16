@@ -16,6 +16,7 @@ from othello.routing import DistanceTable, RoutingCache
 from othello.routing.astar import _TimedOut as _RoutingTimedOut
 
 from .hub_candidates import HubCandidateLimitError, generate_hub_candidates
+from .candidate_tables import candidate_tables
 from .node_orders import enumerate_visiting_orders
 from .outer import _design_key
 from .route_selection import _invoke_checker, select_whole_design_routes
@@ -274,12 +275,11 @@ def improve_design(
                 raise _Unsupported("; ".join(candidates.diagnostics))
             if candidates.status == "no_candidates":
                 diagnostics.append(f"{hub_id}: no sampled alternative hub position")
-            for candidate in candidates.candidates:
+            for candidate, table in candidate_tables(plan, hub_id, hub["assigned_nodes"],
+                                                     candidates.candidates, config, route_cache, effective):
                 _check(effective)
                 if candidate.room_id == hub["room_id"] and candidate.point_m == location:
                     continue
-                table = DistanceTable(plan, _stops(plan, hub, candidate.point_m), config,
-                                      route_cache, effective)
                 replacement = _routed_hub(hub, candidate.room_id, candidate.point_m,
                                           sequence, table, effective)
                 if replacement is not None:

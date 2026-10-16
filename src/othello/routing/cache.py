@@ -110,6 +110,7 @@ class GraphKey:
     tolerance_m: float
     terminals: tuple[tuple[str, Coord], ...]
     leg: tuple[str, str] | None
+    stage: tuple[str, bool] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +168,8 @@ class RoutingCache:
         self._path_misses = 0
         self._graph_hits = 0
         self._graph_misses = 0
+        self._graph_builds = 0
+        self._graph_build_seconds = 0.0
         self._evictions = 0
 
     def get_route(self, key: PathKey, deadline: float | None = None) -> RouteSearchResult | None:
@@ -261,7 +264,14 @@ class RoutingCache:
             evictions=self._evictions,
             path_count=len(self._paths),
             graph_count=len(self._graphs),
+            graph_builds=self._graph_builds,
+            graph_build_seconds=self._graph_build_seconds,
         )
+
+    def record_graph_build(self, seconds: float) -> None:
+        """Count a completed grid construction, including disconnected stages."""
+        self._graph_builds += 1
+        self._graph_build_seconds += seconds
 
     def memory_usage_bytes(self) -> dict[str, int]:
         """Estimate retained cache bytes, counting shared objects once.

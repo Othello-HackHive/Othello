@@ -223,9 +223,16 @@ def select_whole_design_routes(
         if checker is not None:
             evaluate(deepcopy(design))
         libraries: list[tuple[RouteVariant, ...]] = []
-        for _, _, source, target, start, goal, table in entries:
+        for hub_index, leg_index, source, target, start, goal, table in entries:
             _check_deadline(deadline)
-            found = build_route_library(table, source, target, config, deadline)
+            occupied = () if incumbent is None else tuple(
+                tuple(tuple(point) for point in leg["polyline"])
+                for other_hub_index, hub in enumerate(incumbent["hubs"])
+                for other_leg_index, leg in enumerate(hub["ring"]["legs"])
+                if (other_hub_index, other_leg_index) != (hub_index, leg_index)
+            )
+            found = build_route_library(table, source, target, config, deadline,
+                                        occupied_polylines=occupied)
             if found.status != "ready":
                 return result(found.status, found.diagnostics)
             if not found.routes:
@@ -256,7 +263,13 @@ def select_whole_design_routes(
         unverified_choices: tuple[int, ...] | None = None
         if mode == "exact":
             best_proxy: tuple | None = None
-            for choices in product(*(range(len(routes)) for routes in libraries)):
+            ordered_choices = sorted(product(*(range(len(routes)) for routes in libraries)),
+                                     key=lambda choices: (
+                                         sum(libraries[index][choice].weighted_leg_cost
+                                             for index, choice in enumerate(choices)),
+                                         choices,
+                                     ))
+            for choices in ordered_choices:
                 _check_deadline(deadline)
                 if checker is not None:
                     evaluate(_candidate_design(design, choices, libraries))

@@ -93,6 +93,90 @@ def test_same_hub_count_uses_verified_j_then_area_gap(monkeypatch):
     assert result.design["test_label"] == "low_gap"
 
 
+def test_every_quick_partition_runs_before_deep_search(monkeypatch):
+    events = []
+
+    def quick(plan, option, config, cache, deadline):
+        events.append(f"quick:{option.label}")
+        return F0Result("constructed_unverified", _design(option))
+
+    def full(plan, option, config, cache, deadline):
+        events.append(f"full:{option.label}")
+        return F0Result("constructed_unverified", _design(option))
+
+    monkeypatch.setattr(outer, "construct_quick_f0_design", quick)
+    monkeypatch.setattr(outer, "construct_f0_design", full)
+    monkeypatch.setattr(outer, "select_whole_design_routes", lambda *args:
+                        RouteSelectionResult("no_verified_design"))
+    monkeypatch.setattr(outer, "_configuration_designs", lambda *args: ())
+    monkeypatch.setattr(outer, "_improve_incumbent", lambda *args:
+                        ImprovementResult("unchanged", args[1], verified=True, J=1.0))
+
+    def checker(plan, design, config):
+        return NS(valid=True, metrics=NS(J=1.0))
+
+    optimize_partitions(NS(), {1: ([_option("a"), _option("b")], "feasible")},
+                        _config(), checker, lower_bound_hubs=1)
+    assert events == ["quick:a", "quick:b", "full:a", "full:b"]
+
+
+def test_improvement_repeats_only_after_a_better_complete_design(monkeypatch):
+    from copy import deepcopy
+
+    checker, _ = _mock_pipeline(monkeypatch, {"a": 10.0})
+    seen = []
+
+    def improve(plan, design, config, injected_checker, cache, deadline):
+        seen.append(outer._design_key(design))
+        if len(seen) == 1:
+            better = deepcopy(design)
+            leg = better["hubs"][0]["ring"]["legs"][0]
+            leg["polyline"] = [leg["polyline"][0], (1.0, 1.0), leg["polyline"][-1]]
+            return ImprovementResult("improved", better, verified=True, J=5.0)
+        return ImprovementResult("unchanged", design, verified=True, J=5.0)
+
+    monkeypatch.setattr(outer, "_improve_incumbent", improve)
+    result = optimize_partitions(NS(), {1: ([_option("a")], "feasible")},
+                                 _config(), checker, lower_bound_hubs=1)
+    assert len(seen) == 2
+    assert result.J == 5.0
+
+
+def test_improvement_sweeps_memoize_well_formed_rejections(monkeypatch):
+    from copy import deepcopy
+
+    _mock_pipeline(monkeypatch, {"a": 10.0})
+    rejected_checks = 0
+    sweeps = 0
+
+    def checker(plan, design, config):
+        nonlocal rejected_checks
+        polyline = design["hubs"][0]["ring"]["legs"][0]["polyline"]
+        if len(polyline) == 3 and polyline[1] == (9.0, 9.0):
+            rejected_checks += 1
+            return NS(valid=False, metrics=None)
+        return NS(valid=True, metrics=NS(J=5.0 if len(polyline) == 3 else 10.0))
+
+    def improve(plan, design, config, injected_checker, cache, deadline):
+        nonlocal sweeps
+        sweeps += 1
+        rejected = deepcopy(design)
+        leg = rejected["hubs"][0]["ring"]["legs"][0]
+        leg["polyline"] = [leg["polyline"][0], (9.0, 9.0), leg["polyline"][-1]]
+        assert not injected_checker(plan, rejected, config).valid
+        if sweeps == 1:
+            better = deepcopy(design)
+            leg = better["hubs"][0]["ring"]["legs"][0]
+            leg["polyline"] = [leg["polyline"][0], (1.0, 1.0), leg["polyline"][-1]]
+            return ImprovementResult("improved", better, verified=True, J=5.0)
+        return ImprovementResult("unchanged", design, verified=True, J=5.0)
+
+    monkeypatch.setattr(outer, "_improve_incumbent", improve)
+    result = optimize_partitions(NS(), {1: ([_option("a")], "feasible")},
+                                 _config(), checker, lower_bound_hubs=1)
+    assert result.J == 5.0 and sweeps == 2 and rejected_checks == 1
+
+
 def test_unresolved_lower_count_does_not_claim_minimal_hubs(monkeypatch):
     checker, calls = _mock_pipeline(monkeypatch, {"two": 3.0})
     batches = {1: ([_option("one")], "feasible"),

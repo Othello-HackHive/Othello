@@ -151,6 +151,8 @@ class CacheStats:
     evictions: int
     path_count: int
     graph_count: int
+    graph_builds: int = 0
+    graph_build_seconds: float = 0.0
 
     @property
     def path_hit_rate(self) -> float:

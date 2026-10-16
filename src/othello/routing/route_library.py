@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import lru_cache
 import math
 import time
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
-from .astar import _TimedOut, astar_route
+from shapely.geometry import LineString
+
+from .astar import _TimedOut, astar_route, fewest_bends_then_length
 from .table import DistanceTable
 from .types import Coord, Direction, RouteLibraryResult, RouteVariant, ValidatedGraph
 
@@ -84,13 +87,13 @@ def _leg_graph(table: DistanceTable, from_id: str, to_id: str,
 def build_route_library(
     table: DistanceTable, from_id: str, to_id: str, config: Any,
     deadline: float | None = None, initial_direction: Direction | None = None,
+    occupied_polylines: tuple[tuple[Coord, ...], ...] = (),
 ) -> RouteLibraryResult:
     """Return up to limits.routes_per_leg distinct routes for one directed leg.
 
     The DistanceTable first selects the leg-specific transit policy graph and
-    caches the normal weighted route. Alternatives only search that graph or
-    a stricter door-filtered subgraph. No occupancy-penalty variant is claimed:
-    neither the current A* API nor this call has an occupied-cable cost field.
+    caches the normal weighted route. Occupancy affects only an uncached
+    alternative search, never the authoritative graph or cached path result.
     """
     if not isinstance(table, DistanceTable):
         raise ValueError("table must be a DistanceTable")
@@ -166,9 +169,33 @@ def build_route_library(
         assert graph is not None
         if start != goal:
             shortest_config = SimpleNamespace(weights=SimpleNamespace(length=1.0, bend=0.0))
-            bends_config = SimpleNamespace(weights=SimpleNamespace(length=0.0, bend=1.0))
             add(astar_route(graph, start, goal, shortest_config, effective, initial_direction), "shortest_length")
-            add(astar_route(graph, start, goal, bends_config, effective, initial_direction), "fewest_bends")
+            add(fewest_bends_then_length(graph, start, goal, effective, initial_direction), "fewest_bends")
+            occupied = tuple(LineString(polyline) for polyline in occupied_polylines if len(polyline) >= 2
+                             and any(a != b for a, b in zip(polyline, polyline[1:])))
+            if occupied:
+                @lru_cache(maxsize=None)
+                def occupancy_penalty(source: Coord, target: Coord) -> float:
+                    _check(effective)
+                    segment = LineString((source, target))
+                    crossings: set[Coord] = set()
+                    overlap = 0.0
+                    for cable in occupied:
+                        intersection = segment.intersection(cable)
+                        overlap += intersection.length
+                        pending = [intersection]
+                        while pending:
+                            part = pending.pop()
+                            if part.geom_type == "Point":
+                                point = (part.x, part.y)
+                                if point not in (source, target):
+                                    crossings.add(point)
+                            elif hasattr(part, "geoms"):
+                                pending.extend(part.geoms)
+                    return config.weights.crossing * len(crossings) + config.weights.overlap * overlap
+
+                add(astar_route(graph, start, goal, query.config, effective, initial_direction,
+                                edge_penalty=occupancy_penalty), "avoid_placed_cable")
             used_doors = tuple(dict.fromkeys(baseline.opening_ids or ()))
             if used_doors:
                 bans = [frozenset(used_doors)]
@@ -192,7 +219,7 @@ def build_route_library(
             if route.opening_ids not in seen_openings:
                 selected.append(route)
                 seen_openings.add(route.opening_ids)
-        for tag in ("shortest_length", "fewest_bends"):
+        for tag in ("avoid_placed_cable", "shortest_length", "fewest_bends"):
             _check(effective)
             if len(selected) >= cap:
                 break

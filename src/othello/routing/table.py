@@ -3,7 +3,6 @@
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import replace
-from numbers import Real
 import time
 from typing import Any
 
@@ -118,8 +117,15 @@ class DistanceTable:
     def _build_leg_graph(self, graph_key: GraphKey, from_id: str, to_id: str
                          ) -> tuple[ValidatedGraph | None, str | None, tuple[str, ...]]:
         """Run the unchanged pair-specific policy/fallback sequence."""
+        def save_stage(mode: str, fallback: bool, graph: Any, seconds: float) -> None:
+            self.cache.record_graph_build(seconds)
+            if self.deadline is not None and time.monotonic() >= self.deadline:
+                return
+            stage_key = replace(graph_key, leg=None, stage=(mode, fallback))
+            self.cache.put_graph(stage_key, validate_graph(graph))
+
         built = build_routing_graph(self.plan, self.stops, from_id, to_id,
-                                    self.config, self.deadline)
+                                    self.config, self.deadline, save_stage)
         if built.status != "ready":
             if built.status == "unsupported_geometry" and built.diagnostics:
                 failure_key = replace(graph_key, leg=None) if built.cacheable_unsupported else graph_key
@@ -151,6 +157,24 @@ class DistanceTable:
         # A* accepts an isolated vertex as a zero-length route. A fresh build
         # must validate coincident terminals against walls, free space, and policy.
         if start != goal:
+            modes = {"forbid": ("permitted_only",), "allow": ("allow",),
+                     "avoid_if_possible": ("permitted_only", "allow")}[self.config.cable_transit_policy]
+            complete = True
+            for mode in modes:
+                for fallback in (False, True):
+                    stage_key = replace(graph_key, leg=None, stage=(mode, fallback))
+                    staged = self.cache.get_graph(stage_key, self.deadline)
+                    if staged is None:
+                        complete = False
+                        break
+                    if _shared_reaches(staged, start, goal, self.deadline):
+                        return staged, None, (), True
+                if not complete:
+                    break
+            if complete:
+                return None, "unreachable_on_grid", (
+                    "Requested terminals are disconnected on the completed search grids; "
+                    "geometric infeasibility is not proven.",), False
             shared = self.cache.get_graph(replace(graph_key, leg=None), self.deadline)
             if shared is not None and _shared_reaches(shared, start, goal, self.deadline):
                 return shared, None, (), True

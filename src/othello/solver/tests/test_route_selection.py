@@ -58,7 +58,7 @@ def _two_ring_case(monkeypatch, *, reverse=False):
         options = {key: tuple(reversed(routes)) for key, routes in options.items()}
     calls = []
 
-    def library(table, source, target, cfg, deadline=None):
+    def library(table, source, target, cfg, deadline=None, **kwargs):
         calls.append((source, target))
         return RouteLibraryResult("ready", options[source, target])
 
@@ -200,8 +200,8 @@ def test_selected_variant_keeps_ordered_repeated_opening_ids(monkeypatch):
     plan, base, _ = _two_ring_case(monkeypatch)
     original = route_selection.build_route_library
 
-    def with_metadata(table, source, target, cfg, deadline=None):
-        found = original(table, source, target, cfg, deadline)
+    def with_metadata(table, source, target, cfg, deadline=None, **kwargs):
+        found = original(table, source, target, cfg, deadline, **kwargs)
         if (source, target) == ("H1", "N1"):
             route = replace(found.routes[0], opening_ids=("D2", "D1", "D2"))
             return RouteLibraryResult("ready", (route,))

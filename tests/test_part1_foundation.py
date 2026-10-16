@@ -5,6 +5,9 @@ from shapely.geometry import LineString, MultiPolygon, Polygon
 
 from othello.models import SolverConfig
 from othello.reader import build_floor_plan_from_resplan
+from othello.run import run_plan
+from othello.io.official import design_from_official
+from othello.checker import check_design
 from othello.territory import generate_partitions, hub_lower_bound
 
 
@@ -59,6 +62,15 @@ def test_normalises_scale_and_generates_development_nodes():
     assert all(room.area_m2 > 0 for room in plan.eligible_rooms())
 
 
+def test_clipped_eligible_room_remains_an_interior_room():
+    record = sample_record()
+    record["living"] = rectangle(-0.00001, 0, 50, 50)
+    plan = build_floor_plan_from_resplan(record)
+    room = next(room for room in plan.rooms.values() if room.kind == "living")
+    assert room.polygon_m.difference(plan.inner_m).area == 0
+    assert room.inside_inner
+
+
 def test_lower_bound_and_disconnected_partitions():
     plan = build_floor_plan_from_resplan(sample_record())
     assert hub_lower_bound(plan) == 1
@@ -73,6 +85,18 @@ def test_door_links_form_a_connected_territory():
     assert status == "feasible"
     assert len(partitions) == 1
     assert partitions[0].territories[0].room_ids == ["R01", "R02", "R03"]
+
+
+def test_small_reader_record_reaches_independently_valid_official_output(tmp_path):
+    """Exercise reader, partitions, solver, runner, and checker together in CI."""
+    import json
+
+    config = SolverConfig(time_budget_s=20)
+    plan = build_floor_plan_from_resplan(door_connected_record(), config)
+    outcome = run_plan(plan, tmp_path, config, picture=False)
+    assert outcome.status == "ok", (outcome.failure, outcome.notes)
+    official = json.loads(outcome.files["official"].read_text(encoding="utf-8"))
+    assert check_design(plan, design_from_official(plan, official), config).valid
 
 
 def test_rooms_are_repaired_and_made_disjoint():
@@ -170,6 +194,28 @@ def test_geometry_verified_open_passage_is_a_zone_link():
     plan = build_floor_plan_from_resplan(record)
     assert "R02" in plan.room_graph["R01"]
     assert [opening.kind for opening in plan.openings.values()] == ["open_passage"]
+
+
+def test_resplan_8554_passage_uses_open_span_instead_of_corner_edge():
+    """The source passage has a long shared opening but a tiny first polygon edge."""
+    import json
+    from pathlib import Path
+
+    from shapely import wkt
+
+    from othello.reader.load_plan import _passage_gap_polyline
+
+    fixture = json.loads((Path(__file__).parent / "data" / "resplan_8554_passage.json")
+                         .read_text(encoding="utf-8"))
+    assert fixture["source_plan_id"] == "8554"
+    room_a = wkt.loads(fixture["room_a_wkt"])
+    room_b = wkt.loads(fixture["room_b_wkt"])
+    gap = wkt.loads(fixture["candidate_gap_wkt"])
+    line = _passage_gap_polyline(room_a, room_b, gap, SolverConfig().tolerance_m)
+    assert line is not None
+    assert LineString(line).length > 3.8
+    assert abs(line[0][1] - line[1][1]) < 1e-9
+    assert gap.covers(LineString(line))
 
 
 def test_scale_matches_the_problem_statement_example():

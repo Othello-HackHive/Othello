@@ -49,6 +49,29 @@ def test_one_node_proxy_is_twice_manhattan_distance(basic_case):
         assert candidate.attachment_proxy_m == pytest.approx(2 * (abs(x - 1.125) + abs(y - 1.375)))
 
 
+def test_minimum_hub_node_distance_avoids_zero_length_legs(basic_case):
+    plan, territory = basic_case
+    config = make_config()
+    config.min_hub_node_distance_m = 0.002
+    result = generate_hub_candidates(plan, territory, config)
+    assert result.status == "ready"
+    node = plan.nodes["N1"].point_m
+    assert all(math.dist(candidate.point_m, node) >= 0.002 - 1e-12
+               for candidate in result.candidates)
+    config.min_hub_node_distance_m = 0
+    allowed = generate_hub_candidates(plan, territory, config)
+    assert any(candidate.point_m == node for candidate in allowed.candidates)
+
+
+def test_hub_zone_too_small_for_node_separation_returns_no_candidates():
+    zone = Point(1, 1).buffer(0.0005)
+    plan, territory = make_case(zones={"R1": zone})
+    config = make_config()
+    config.min_hub_node_distance_m = 0.002
+    result = generate_hub_candidates(plan, territory, config)
+    assert result.status == "no_candidates"
+
+
 def test_two_distinct_nodes_with_same_coordinate_count_separately(basic_case):
     plan, territory = basic_case
     plan.nodes["N1"].point_m = (1, 1)
@@ -269,3 +292,52 @@ def test_selected_points_span_room_instead_of_only_shortest_proxy(basic_case):
     points = [candidate.point_m for candidate in result.candidates]
     assert max(x for x, _ in points) - min(x for x, _ in points) >= 2
     assert max(y for _, y in points) - min(y for _, y in points) >= 2
+
+
+def test_resplan_6492_recovers_the_r01_d2_doorway_witness():
+    """The real narrow D2 zone was missed by grid and nearest-point samples."""
+    dataset_path = Path(__file__).resolve().parents[4] / "resplan" / "ResPlan.pkl"
+    if not dataset_path.exists():
+        pytest.skip("optional ResPlan dataset is unavailable")
+    from othello.models import SolverConfig
+    from othello.reader.load_plan import build_floor_plan_from_resplan, load_resplan_dataset
+    from othello.territory import generate_partitions, hub_lower_bound
+
+    config = SolverConfig()
+    record = next(record for record in load_resplan_dataset(dataset_path) if record["id"] == 6492)
+    plan = build_floor_plan_from_resplan(record, config)
+    options, status = generate_partitions(plan, hub_lower_bound(plan, config), config)
+    assert status == "feasible"
+    territory = next(territory for territory in options[0].territories if "R01" in territory.room_ids)
+    result = generate_hub_candidates(plan, territory, config)
+    assert result.status == "ready", result.diagnostics
+    witnesses = [candidate for candidate in result.candidates
+                 if candidate.room_id == "R01" and "D2" in candidate.nearby_opening_ids]
+    assert witnesses
+    gap = plan.openings["D2"].gap_polyline_m
+    from shapely.geometry import LineString
+    threshold = plan.hub_zones_m["R01"].distance(LineString(gap)) + config.hub_grid_step_m
+    for candidate in witnesses:
+        point = Point(candidate.point_m)
+        assert plan.rooms["R01"].polygon_m.contains(point)
+        assert plan.hub_zones_m["R01"].covers(point)
+        assert plan.free_space_m.covers(point)
+        assert point.distance(plan.walls_m) >= config.hub_wall_clearance_m - 1e-12
+        assert point.distance(LineString(gap)) <= threshold + 1e-12
+
+
+def test_witness_recovery_when_every_regular_sample_misses_clearance_sliver():
+    room = make_room("R1", box(0, 0, 4, 4))
+    wall = box(-1, 0, 0, 4)
+    zone = Polygon([(0.4, 1.1), (0.52, 1.1), (0.4, 1.24)])
+    door = make_opening("D1", [(0, 1.1), (0, 1.2)])
+    plan, territory = make_case(rooms=[room], zones={"R1": zone},
+                                openings=[door], walls=wall)
+    result = generate_hub_candidates(plan, territory, make_config())
+    assert result.status == "ready", result.diagnostics
+    assert any("D1" in candidate.nearby_opening_ids for candidate in result.candidates)
+    for candidate in result.candidates:
+        point = Point(candidate.point_m)
+        assert zone.covers(point)
+        assert room.polygon_m.contains(point)
+        assert point.distance(wall) >= 0.5 - 1e-14

@@ -87,16 +87,37 @@ def _safe_point(room_m: Any, obstacles_m: Any, clearance_m: float) -> Point:
     return allowed.representative_point()
 
 
-def _gap_polyline(geometry: Any) -> list[tuple[float, float]]:
-    boundary = getattr(geometry, "boundary", None)
-    if boundary is not None and hasattr(boundary, "geoms"):
-        parts = [part for part in boundary.geoms if part is not None and not part.is_empty]
-        boundary = max(parts, key=lambda item: item.length) if parts else None
-    coordinates = list(boundary.coords) if boundary is not None and hasattr(boundary, "coords") else []
-    if len(coordinates) >= 2:
-        return [(float(coordinates[0][0]), float(coordinates[0][1])), (float(coordinates[1][0]), float(coordinates[1][1]))]
-    centroid = geometry.representative_point()
-    return [(float(centroid.x), float(centroid.y))] * 2
+def _passage_gap_polyline(room_a: Any, room_b: Any, gap: Any,
+                          tolerance_m: float) -> list[tuple[float, float]] | None:
+    """Use the longest wall-free shared boundary, never a polygon's first edge.
+
+    ResPlan 8554 has a 3.83 m open span, but the old first-edge rule made a
+    0.016 m diagonal gap at its corner. Separated room polygons have no
+    unambiguous shared crossing line and remain unlabelled.
+    """
+    shared = room_a.boundary.intersection(room_b.boundary).intersection(gap)
+
+    def lines(geometry: Any) -> list[LineString]:
+        if geometry.geom_type == "LineString":
+            return [geometry]
+        if hasattr(geometry, "geoms"):
+            return [line for part in geometry.geoms for line in lines(part)]
+        return []
+
+    candidates = []
+    for line in lines(shared):
+        if line.length <= max(0.05, 10 * tolerance_m):
+            continue
+        start, end = line.coords[0], line.coords[-1]
+        if abs(start[0] - end[0]) > tolerance_m and abs(start[1] - end[1]) > tolerance_m:
+            continue
+        candidates.append(line)
+    if not candidates:
+        return None
+    chosen = max(candidates, key=lambda line: (line.length, tuple(line.bounds)))
+    trim = min(max(2 * tolerance_m, 1e-6), chosen.length / 4)
+    return [(float(point.x), float(point.y))
+            for point in (chosen.interpolate(trim), chosen.interpolate(chosen.length - trim))]
 
 
 def _door_gap_line(
@@ -282,7 +303,10 @@ def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig |
                 # ResPlan occasionally overlays exterior labels over the
                 # drawing interior.  Those labels are never transit rooms in
                 # the challenge, even when their clipped geometry has area.
-                inside_inner=kind not in EXTERIOR_KINDS and inner_m.covers(polygon_m),
+                # polygon_m was intersected with inner_m above. Repeating an
+                # exact covers predicate can disagree by floating-point slivers
+                # on real ResPlan boundaries (for example plan 12823).
+                inside_inner=kind not in EXTERIOR_KINDS,
             )
             claimed_room_area_m = unary_union([claimed_room_area_m, polygon_m])
 
@@ -362,7 +386,13 @@ def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig |
         )
         if gap is None:
             continue
-        gap_polyline_m = _gap_polyline(gap)
+        gap_polyline_m = _passage_gap_polyline(
+            rooms[source_room].polygon_m, rooms[target_room].polygon_m,
+            gap, config.tolerance_m,
+        )
+        if gap_polyline_m is None:
+            repairs.append("Dropped inferred passage P: no unambiguous shared crossing line")
+            continue
         gap_line = LineString(gap_polyline_m)
         if not free_space_m.covers(gap_line) or gap_line.intersection(routing_obstacles_m).length > 0:
             repairs.append(f"Dropped inferred passage P: no unambiguous free-space gap")

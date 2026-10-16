@@ -183,6 +183,46 @@ def slide5_plan() -> FloorPlan:
     )
 
 
+def grid9_plan() -> FloorPlan:
+    """Nine 3 x 3 m eligible rooms in a fully door-connected grid."""
+    rooms = []
+    nodes = []
+    openings = []
+    door_index = 1
+    for row in range(3):
+        for column in range(3):
+            index = row * 3 + column + 1
+            room_id = f"R{index:02d}"
+            x, y = 3.0 * column, 3.0 * row
+            rooms.append((room_id, "bedroom" if index != 5 else "living",
+                          box(x, y, x + 3.0, y + 3.0)))
+            nodes.append((f"N{index}", room_id, (x + 1.5, y + 1.5)))
+            if column:
+                left = f"R{index - 1:02d}"
+                openings.append((f"D{door_index}", "door", [left, room_id],
+                                 [(x, y + 1.05), (x, y + 1.95)], True))
+                door_index += 1
+            if row:
+                below = f"R{index - 3:02d}"
+                openings.append((f"D{door_index}", "door", [below, room_id],
+                                 [(x + 1.05, y), (x + 1.95, y)], True))
+                door_index += 1
+    return _build_plan("GRID9_PLAN", rooms, nodes, openings)
+
+
+def l_plan() -> FloorPlan:
+    """Three connected 4 x 4 m rooms with a concave inner boundary."""
+    return _build_plan(
+        "L_PLAN",
+        [("R01", "living", box(0, 0, 4, 4)),
+         ("R02", "bedroom", box(4, 0, 8, 4)),
+         ("R03", "kitchen", box(0, 4, 4, 8))],
+        [("N1", "R01", (2, 2)), ("N2", "R02", (6, 2)), ("N3", "R03", (2, 6))],
+        [("D1", "door", ["R01", "R02"], [(4, 1.5), (4, 2.5)], True),
+         ("D2", "door", ["R01", "R03"], [(1.5, 4), (2.5, 4)], True)],
+    )
+
+
 # Hub areas of the good slide 5 design (H1: R05+R01+R04, H2: R03+R02+R06).
 SLIDE5_HUB_AREAS = {"H1": 71.0, "H2": 47.0}
 TINY_HUB_AREAS = {"H1": 32.0}
