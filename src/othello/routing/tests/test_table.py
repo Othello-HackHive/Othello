@@ -1,0 +1,375 @@
+"""Tests for Task 3.3 DistanceTable, lazy evaluation, and status fidelity."""
+
+from types import SimpleNamespace
+
+import pytest
+from shapely.geometry import Polygon, box
+
+from conftest import make_config, make_opening, make_plan, make_room
+from othello.routing import (
+    DistanceTable,
+    RoutingCache,
+    RoutingFailureError,
+    TableRouteResult,
+    build_distance_table,
+    build_routing_graph,
+)
+
+
+def sample_plan():
+    return make_plan(
+        inner=box(0, 0, 10, 10),
+        walls=box(4, 0, 6, 8),
+        rooms=[make_room("R1", box(0, 0, 5, 10)), make_room("R2", box(5, 0, 10, 10))],
+        openings=[make_opening("D1", ["R1", "R2"], [(5, 8.5), (5, 9.5)])],
+    )
+
+
+def test_distance_table_strictly_lazy_population():
+    plan = sample_plan()
+    stops = {"H1": (1, 2), "N1": (9, 2), "N2": (1, 8)}
+    cfg = make_config(weights=SimpleNamespace(length=1.0, bend=0.5))
+    cache = RoutingCache()
+
+    table = build_distance_table(plan, stops, cfg, cache)
+    # Zero queries executed in constructor
+    assert len(table._routes) == 0
+    assert cache.stats().path_misses == 0
+    assert cache.stats().graph_misses == 0
+
+    # Query one leg
+    route = table.get_route("H1", "N1")
+    assert route.status == "success"
+    assert len(table._routes) == 1
+    assert cache.stats().path_misses == 1
+    assert cache.stats().path_hits == 0
+
+    # Query same leg again -> hit
+    route2 = table.get_route("H1", "N1")
+    assert route2.status == "success"
+    assert route2.polyline == route.polyline
+    assert cache.stats().path_hits == 1
+
+
+def test_strict_winner_length_vs_cost_distinction(monkeypatch):
+    # Route 'long':  (0,0) -> (0,3) -> (4,3) -> (4,2). Length = 8.0, Bends = 2.
+    # Route 'short': (0,0) -> (1,0) -> (1,1) -> (2,1) -> (2,2) -> (4,2). Length = 6.0, Bends = 4.
+    from test_astar import tradeoff_graph
+    tg = tradeoff_graph()
+
+    plan = sample_plan()
+    stops = {"A": (0, 0), "B": (4, 2)}
+    monkeypatch.setattr(
+        "othello.routing.table.build_routing_graph",
+        lambda *args, **kwargs: SimpleNamespace(status="ready", graph=tg, diagnostics=()),
+    )
+
+    # 1. Weights favor fewer bends (w_L=1.0, w_B=2.0)
+    # Cost(long) = 8.0 * 1.0 + 2 * 2.0 = 12.0  (STRICT WINNER)
+    # Cost(short) = 6.0 * 1.0 + 4 * 2.0 = 14.0
+    cache1 = RoutingCache()
+    cfg_bends = make_config(weights=SimpleNamespace(length=1.0, bend=2.0))
+    table_bends = DistanceTable(plan, stops, cfg_bends, cache1)
+
+    assert table_bends.get_distance("A", "B") == 8.0
+    assert table_bends.get_cost("A", "B") == 12.0
+    r_bends = table_bends.get_route("A", "B")
+    assert r_bends.length_m == 8.0
+    assert r_bends.internal_bends == 2
+    assert r_bends.cost == 12.0
+
+    # 2. Weights favor shorter length (w_L=1.0, w_B=0.1)
+    # Cost(short) = 6.0 * 1.0 + 4 * 0.1 = 6.4   (STRICT WINNER)
+    # Cost(long) = 8.0 * 1.0 + 2 * 0.1 = 8.2
+    cache2 = RoutingCache()
+    cfg_len = make_config(weights=SimpleNamespace(length=1.0, bend=0.1))
+    table_len = DistanceTable(plan, stops, cfg_len, cache2)
+
+    assert table_len.get_distance("A", "B") == 6.0
+    assert table_len.get_cost("A", "B") == pytest.approx(6.4)
+    r_len = table_len.get_route("A", "B")
+    assert r_len.length_m == 6.0
+    assert r_len.internal_bends == 4
+    assert r_len.cost == pytest.approx(6.4)
+
+
+def test_coincident_stops_preserves_node_visitation():
+    plan = sample_plan()
+    stops = {"H1": (1, 2), "N1": (1, 2)}
+    cfg = make_config(weights=SimpleNamespace(length=1.0, bend=0.5))
+    cache = RoutingCache()
+    table = DistanceTable(plan, stops, cfg, cache)
+
+    # Coincident self-query
+    assert table.get_distance("H1", "H1") == 0.0
+    assert table.get_cost("H1", "H1") == 0.0
+    r_self = table.get_route("H1", "H1")
+    assert r_self.status == "success"
+    assert r_self.polyline == [(1, 2)]
+    assert r_self.length_m == 0.0
+    assert r_self.cost == 0.0
+    assert r_self.first_direction is None and r_self.last_direction is None
+
+    # Coincident distinct terminal query
+    assert table.get_distance("H1", "N1") == 0.0
+    assert table.get_cost("H1", "N1") == 0.0
+    r_pair = table.get_route("H1", "N1")
+    assert r_pair.status == "success"
+    assert r_pair.polyline == [(1, 2)]
+
+
+@pytest.mark.parametrize("policy", ["forbid", "allow", "avoid_if_possible"])
+def test_graph_cache_respects_pair_dependent_fallback_for_every_policy(policy):
+    # A concave plan separates the lower arms. The first leg stays in the
+    # left arm on the Hanan lines; the second needs fallback y=5 to detour.
+    inner = Polygon([(0, 0), (2, 0), (2, 4), (4, 4), (4, 0), (6, 0), (6, 6), (0, 6)])
+    plan = make_plan(inner=inner)
+    stops = {"A": (1.123, 1.321), "B": (1.523, 1.321), "C": (5.321, 1.321)}
+    cfg = make_config(grid_step_m=1.0, cable_transit_policy=policy,
+                      weights=SimpleNamespace(length=1.0, bend=0.5))
+    first_graph = build_routing_graph(plan, stops, "A", "B", cfg)
+    second_graph = build_routing_graph(plan, stops, "A", "C", cfg)
+    assert first_graph.status == second_graph.status == "ready"
+    assert not first_graph.fallback_used
+    assert second_graph.fallback_used
+
+    cache = RoutingCache()
+    table = DistanceTable(plan, stops, cfg, cache)
+    assert table.get_route("A", "B").status == "success"
+    cached_sequence_result = table.get_route("A", "C")
+    clean_result = DistanceTable(plan, stops, cfg, RoutingCache()).get_route("A", "C")
+
+    assert cached_sequence_result == clean_result
+    assert cached_sequence_result.status == "success"
+    assert cache.stats().graph_misses == 2
+    assert cache.stats().graph_hits == 0
+    assert {key.leg for key in cache._graphs} == {("A", "B"), ("A", "C")}
+
+
+@pytest.mark.parametrize("case,expected_status", [
+    ("outside_free_space", "unsupported_geometry"),
+    ("inside_window", "unreachable_on_grid"),
+    ("inside_wall", "unreachable_on_grid"),
+    ("ambiguous_room_boundary", "unsupported_geometry"),
+])
+def test_invalid_coincident_self_query_never_succeeds(case, expected_status):
+    plan = make_plan(inner=box(0, 0, 10, 10))
+    point = (5.0, 5.0)
+    if case == "outside_free_space":
+        point = (-1.0, 5.0)
+    elif case == "inside_window":
+        plan = make_plan(inner=box(0, 0, 10, 10), windows=box(4, 4, 6, 6))
+    elif case == "inside_wall":
+        plan = make_plan(inner=box(0, 0, 10, 10), walls=box(4, 4, 6, 6))
+    else:
+        plan = make_plan(inner=box(0, 0, 10, 10), rooms=[
+            make_room("R1", box(0, 0, 5, 10)),
+            make_room("R2", box(5, 0, 10, 10)),
+        ])
+
+    cfg = make_config(weights=SimpleNamespace(length=1.0, bend=0.5))
+    table = DistanceTable(plan, {"X": point}, cfg, RoutingCache())
+    result = table.get_route("X", "X")
+    assert result.status == expected_status
+    assert result.polyline is None
+    assert result.length_m is None
+    assert result.diagnostics
+
+
+def test_standardized_timeout_and_status_fidelity(monkeypatch):
+    plan = sample_plan()
+    stops = {"H1": (1, 2), "N1": (9, 2)}
+    cfg = make_config(weights=SimpleNamespace(length=1.0, bend=0.5))
+    cache = RoutingCache()
+
+    # Initialize table when deadline has not expired
+    monkeypatch.setattr("time.monotonic", lambda: 0.0)
+    table = DistanceTable(plan, stops, cfg, cache, deadline=10.0)
+
+    # Force subsequent query execution to experience timeout
+    monkeypatch.setattr("time.monotonic", lambda: 20.0)
+
+    # get_route returns TableRouteResult with status="timeout"
+    route = table.get_route("H1", "N1")
+    assert route.status == "timeout"
+    assert route.diagnostics
+
+    # get_distance raises RoutingFailureError on timeout
+    with pytest.raises(RoutingFailureError) as exc_info:
+        table.get_distance("H1", "N1")
+    assert exc_info.value.status == "timeout"
+
+    # get_distance with explicit default returns fallback
+    assert table.get_distance("H1", "N1", default=float("inf")) == float("inf")
+
+    # get_cost raises RoutingFailureError on timeout
+    with pytest.raises(RoutingFailureError) as exc_cost:
+        table.get_cost("H1", "N1")
+    assert exc_cost.value.status == "timeout"
+    assert table.get_cost("H1", "N1", default=-1.0) == -1.0
+
+
+def test_unreachable_on_grid_status_propagation():
+    # Disconnected rooms without openings
+    plan = make_plan(
+        inner=box(0, 0, 10, 10),
+        walls=box(4, 0, 6, 10),  # Complete dividing wall, no openings
+        rooms=[make_room("R1", box(0, 0, 5, 10)), make_room("R2", box(5, 0, 10, 10))],
+    )
+    stops = {"H1": (1, 2), "N1": (9, 2)}
+    cfg = make_config(weights=SimpleNamespace(length=1.0, bend=0.5))
+    cache = RoutingCache()
+    table = DistanceTable(plan, stops, cfg, cache)
+
+    route = table.get_route("H1", "N1")
+    assert route.status == "unreachable_on_grid"
+
+    with pytest.raises(RoutingFailureError) as exc:
+        table.get_distance("H1", "N1")
+    assert exc.value.status == "unreachable_on_grid"
+
+    # Default fallback returns value without raising
+    assert table.get_distance("H1", "N1", default=float("inf")) == float("inf")
+
+
+def test_distance_matrix_and_summary_hit_rate():
+    plan = sample_plan()
+    stops = {"H1": (1, 2), "N1": (9, 2), "N2": (1, 8)}
+    cfg = make_config(weights=SimpleNamespace(length=1.0, bend=0.5))
+    cache = RoutingCache()
+    table = DistanceTable(plan, stops, cfg, cache)
+
+    matrix = table.distance_matrix()
+    assert len(matrix) == 9  # 3 x 3
+    for s in stops:
+        assert matrix[(s, s)] == 0.0
+
+    # Off diagonals are positive
+    assert matrix[("H1", "N1")] > 0.0
+    assert matrix[("H1", "N2")] > 0.0
+
+    # Query matrix again: must be 100% cache hits
+    matrix2 = table.distance_matrix()
+    assert matrix2 == matrix
+
+    stats = cache.stats()
+    assert stats.path_hits > 0
+    assert "path_hit_rate=" in stats.summary()
+
+
+def test_local_memo_invalidates_when_plan_geometry_mutates():
+    plan = sample_plan()
+    stops = {"H1": (1, 2), "N1": (9, 2)}
+    cfg = make_config(weights=SimpleNamespace(length=1.0, bend=0.5))
+    cache = RoutingCache()
+    table = DistanceTable(plan, stops, cfg, cache)
+
+    r1 = table.get_route("H1", "N1")
+    assert r1.status == "success"
+
+    # Completely divide rooms with full-height wall and no openings
+    plan.walls_m = box(4, 0, 6, 10)
+    plan.free_space_m = plan.inner_m.difference(plan.walls_m)
+    plan.openings.clear()
+    # Query again -> detects fingerprint mismatch in _make_path_key, produces new key
+    r2 = table.get_route("H1", "N1")
+    assert r2.status == "unreachable_on_grid"
+
+
+def test_config_changes_isolate_cache():
+    plan = sample_plan()
+    stops = {"H1": (1, 2), "N1": (9, 2)}
+    cache = RoutingCache()
+
+    # Route with config 1 (bend weight = 0.1)
+    cfg1 = make_config(weights=SimpleNamespace(length=1.0, bend=0.1))
+    table1 = DistanceTable(plan, stops, cfg1, cache)
+    r1 = table1.get_route("H1", "N1")
+    assert r1.status == "success"
+
+    # Route with config 2 (bend weight = 2.0) -> different PathKey
+    cfg2 = make_config(weights=SimpleNamespace(length=1.0, bend=2.0))
+    table2 = DistanceTable(plan, stops, cfg2, cache)
+    r2 = table2.get_route("H1", "N1")
+    assert r2.status == "success"
+
+    # Should have 2 path misses and 0 hits across different configs
+    stats = cache.stats()
+    assert stats.path_misses == 2
+    assert stats.path_hits == 0
+
+
+def test_terminal_set_changes_isolate_graph_cache():
+    plan = sample_plan()
+    cache = RoutingCache()
+    cfg = make_config(weights=SimpleNamespace(length=1.0, bend=0.5))
+
+    # Table A with 2 stops
+    stops_a = {"H1": (1, 2), "N1": (9, 2)}
+    table_a = DistanceTable(plan, stops_a, cfg, cache)
+    r_a = table_a.get_route("H1", "N1")
+    assert r_a.status == "success"
+    assert cache.stats().graph_misses == 1
+
+    # Table B with 3 stops -> different terminal coordinates signature in GraphKey
+    stops_b = {"H1": (1, 2), "N1": (9, 2), "N2": (3, 3)}
+    table_b = DistanceTable(plan, stops_b, cfg, cache)
+    r_b = table_b.get_route("H1", "N1")
+    assert r_b.status == "success"
+    # Produces a new GraphKey because terminals set changed coordinate grid lines
+    assert cache.stats().graph_misses == 2
+
+
+def test_cached_vs_uncached_strict_equivalence():
+    plan = sample_plan()
+    stops = {"H1": (1, 2), "N1": (9, 2)}
+    cfg = make_config(weights=SimpleNamespace(length=1.0, bend=0.5))
+
+    # Uncached run
+    cache_empty = RoutingCache()
+    table_uncached = DistanceTable(plan, stops, cfg, cache_empty)
+    res_uncached = table_uncached.get_route("H1", "N1")
+    assert res_uncached.status == "success"
+
+    # Cached run
+    cache_populated = RoutingCache()
+    table_cached = DistanceTable(plan, stops, cfg, cache_populated)
+    _ = table_cached.get_route("H1", "N1")  # prime cache
+    res_cached = table_cached.get_route("H1", "N1")  # hit
+
+    # Check complete equivalence across all fields
+    assert res_cached.status == res_uncached.status
+    assert res_cached.polyline == res_uncached.polyline
+    assert res_cached.length_m == res_uncached.length_m
+    assert res_cached.cost == res_uncached.cost
+    assert res_cached.internal_bends == res_uncached.internal_bends
+    assert res_cached.initial_bend == res_uncached.initial_bend
+    assert res_cached.opening_ids == res_uncached.opening_ids
+    assert res_cached.first_direction == res_uncached.first_direction
+    assert res_cached.last_direction == res_uncached.last_direction
+    assert res_cached.diagnostics == res_uncached.diagnostics
+
+
+def test_timeout_never_cached_allows_subsequent_success(monkeypatch):
+    plan = sample_plan()
+    stops = {"H1": (1, 2), "N1": (9, 2)}
+    cfg = make_config(weights=SimpleNamespace(length=1.0, bend=0.5))
+    cache = RoutingCache()
+
+    # Query 1 times out
+    monkeypatch.setattr("time.monotonic", lambda: 0.0)
+    table1 = DistanceTable(plan, stops, cfg, cache, deadline=5.0)
+    monkeypatch.setattr("time.monotonic", lambda: 10.0)
+    r1 = table1.get_route("H1", "N1")
+    assert r1.status == "timeout"
+    assert cache.stats().path_count == 0  # Timeout must NEVER be cached
+
+    # Query 2 with generous deadline succeeds
+    monkeypatch.setattr("time.monotonic", lambda: 0.0)
+    table2 = DistanceTable(plan, stops, cfg, cache, deadline=100.0)
+    r2 = table2.get_route("H1", "N1")
+    assert r2.status == "success"
+    assert cache.stats().path_count == 1
+
+
+
