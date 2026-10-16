@@ -24,6 +24,12 @@ export interface OverlayDraw {
   bends: Vec2[];
   metrics: { L: number; X: number; O: number; B: number; J: number; areaGap: number } | null;
   rules: Record<string, boolean> | null;
+  checks: RuleCheck[];
+  status: string | null;
+  valid: boolean | null;
+  provenMinimum: boolean | null;
+  lowerBoundHubs: number | null;
+  notes: string[];
   warnings: string[];
 }
 
@@ -99,6 +105,7 @@ const pointList = (raw: unknown): Vec2[] =>
 export function parseOverlay(json: Record<string, unknown>, plan: PlanModel): OverlayDraw {
   const warnings: string[] = [];
   const numOrNull = (value: unknown) => toNum(value);
+  const geometry = (json.geometry ?? {}) as Record<string, unknown>;
 
   const violationsRaw = values(json.violations);
   const violations = violationsRaw.map((entry): { kind: "point" | "polyline" | "polygon"; pts: Vec2[] } => {
@@ -133,12 +140,13 @@ export function parseOverlay(json: Record<string, unknown>, plan: PlanModel): Ov
     return { id: `H${index + 1}`, point: toVec(entry) ?? plan.bounds.center };
   });
 
-  const openings = values(json.openings)
+  const openings = values(json.openings ?? geometry.openings)
     .map((entry) => {
       const bag = (entry ?? {}) as Record<string, unknown>;
-      const seg = polylineList(bag.polygon ?? bag.segment ?? entry);
-      const a = String(bag.a ?? bag.from ?? bag.room_a ?? "");
-      const b = String(bag.b ?? bag.to ?? bag.room_b ?? "");
+      const seg = polylineList(bag.gap ?? bag.polygon ?? bag.segment ?? entry);
+      const rooms = values(bag.rooms);
+      const a = String(bag.a ?? bag.from ?? bag.room_a ?? rooms[0] ?? "");
+      const b = String(bag.b ?? bag.to ?? bag.room_b ?? rooms[1] ?? "");
       return seg[0] ? { a, b, from: seg[0][0], to: seg[0][1] } : null;
     })
     .filter(Boolean) as Array<{ a: string; b: string; from: Vec2; to: Vec2 }>;
@@ -152,18 +160,30 @@ export function parseOverlay(json: Record<string, unknown>, plan: PlanModel): Ov
           O: numOrNull(metricsBag.O) ?? numOrNull(metricsBag.overlap_m) ?? 0,
           B: numOrNull(metricsBag.B) ?? numOrNull(metricsBag.bends) ?? 0,
           J: numOrNull(metricsBag.J) ?? numOrNull(metricsBag.cost_J) ?? 0,
-          areaGap: numOrNull(metricsBag.area_gap) ?? numOrNull(metricsBag.areaGap) ?? 0,
+          areaGap: numOrNull(metricsBag.area_gap_m2) ?? numOrNull(metricsBag.area_gap) ?? numOrNull(metricsBag.areaGap) ?? 0,
         }
       : null;
 
-  const rulesRaw = (json.rules ?? json.rule_summary ?? json.checks) as Record<string, unknown> | undefined;
-  const rules = rulesRaw && typeof rulesRaw === "object" ? Object.fromEntries(Object.entries(rulesRaw).map(([k, v]) => [k, Boolean(v)])) : null;
+  const checks = values(json.checks).filter((item) => item && typeof item === "object" && !Array.isArray(item)).map((item) => {
+    const check = item as Record<string, unknown>;
+    return {
+      id: String(check.rule_id ?? check.id ?? "unknown"),
+      label: String(check.label ?? check.rule_id ?? "CHECK"),
+      pass: check.passed === true,
+      value: String(check.value ?? (check.passed === true ? "PASS" : "FAIL")),
+      detail: String(check.detail ?? ""),
+    };
+  });
+  const rulesRaw = json.rules ?? json.rule_summary;
+  const rules = rulesRaw && typeof rulesRaw === "object" && !Array.isArray(rulesRaw)
+    ? Object.fromEntries(Object.entries(rulesRaw).map(([k, v]) => [k, v === true])) : null;
+  const boundsReport = (json.bounds_report ?? {}) as Record<string, unknown>;
 
   const raw = {
     schemaVersion: toNum(json.schema_version) ?? toNum(json.schemaVersion),
     planId: (json.plan_id ?? json.planId ?? null) as string | null,
-    walls: polylineList(json.walls),
-    windows: polylineList(json.windows),
+    walls: polylineList(json.walls ?? geometry.walls),
+    windows: polylineList(json.windows ?? geometry.windows),
     openings,
     nodes,
     hubs,
@@ -174,6 +194,12 @@ export function parseOverlay(json: Record<string, unknown>, plan: PlanModel): Ov
     bends: pointList(json.bends ?? (json.markers as { bends?: unknown } | undefined)?.bends),
     metrics,
     rules,
+    checks,
+    status: typeof json.status === "string" ? json.status : null,
+    valid: typeof json.valid === "boolean" ? json.valid : null,
+    provenMinimum: typeof boundsReport.proven_minimum === "boolean" ? boundsReport.proven_minimum : null,
+    lowerBoundHubs: toNum(boundsReport.lower_bound_hubs),
+    notes: values(json.notes).filter((item): item is string => typeof item === "string"),
   };
 
   const conv = (points: Vec2[], tag: string) => meterize(points, plan, warnings, tag);
@@ -264,7 +290,7 @@ export function solutionFromOfficial(
   const B = overlayMetrics?.B ?? 0;
   const J = overlayMetrics?.J ?? toNum(reported.cost_J) ?? L + 5 * X + O + 0.5 * B;
   const areas = hubs.map((hub) => hub.area_m2).sort((a, b) => b - a);
-  const areaGap = overlayMetrics?.areaGap ?? (areas.length > 1 ? areas[0] - areas[1] : 0);
+  const areaGap = overlayMetrics?.areaGap ?? (areas.length > 1 ? areas[0] - areas[areas.length - 1] : 0);
 
   const ruleDefs: Array<{ id: string; label: string; detail: string; aliases: string[] }> = [
     { id: "coverage", label: "COVERAGE", detail: "every eligible room & node assigned", aliases: ["coverage", "full_coverage"] },
@@ -275,7 +301,7 @@ export function solutionFromOfficial(
     { id: "clearance", label: "HUB CLEARANCE", detail: "≥ 0.5 m from walls", aliases: ["clearance", "hub_clearance"] },
   ];
   const rules = overlay?.rules;
-  const checks: RuleCheck[] = ruleDefs.map((rule) => {
+  const checks: RuleCheck[] = overlay?.checks.length ? overlay.checks : ruleDefs.map((rule) => {
     const known = rules ? rule.aliases.some((alias) => alias in rules) : false;
     const pass = known ? (rules as Record<string, boolean>)[rule.aliases.find((alias) => alias in (rules as Record<string, boolean>)) ?? ""] : false;
     return {
@@ -325,7 +351,7 @@ export function solutionFromOfficial(
       B,
       J,
       areaGap,
-      hubLowerBound: Math.max(Math.ceil(plan.eligibleAreaM2 / 100), Math.ceil(plan.eligibleRooms.length / 5), 1),
+      hubLowerBound: overlay?.lowerBoundHubs ?? Math.max(Math.ceil(plan.eligibleAreaM2 / 100), Math.ceil(plan.eligibleRooms.length / 5), 1),
       nodeCount: plan.eligibleRooms.length,
       eligibleArea: Number(plan.eligibleAreaM2.toFixed(2)),
     },
