@@ -56,8 +56,8 @@ def _graph_node_id(kind: str, index: int) -> str:
     return f"{kind}_{index}"
 
 
-def _safe_point(room_m: Any, walls_m: Any, clearance_m: float) -> Point:
-    allowed = room_m.difference(walls_m.buffer(clearance_m))
+def _safe_point(room_m: Any, obstacles_m: Any, clearance_m: float) -> Point:
+    allowed = room_m.difference(obstacles_m.buffer(clearance_m))
     if allowed.is_empty:
         raise InputError("Eligible room has no point with required wall clearance")
     return allowed.representative_point()
@@ -172,6 +172,7 @@ def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig |
     inner_m = _scale_geometry(inner_units, scale)
     walls_m = _scale_geometry(geometries_units.get("wall", GeometryCollection()), scale)
     windows_m = _scale_geometry(geometries_units.get("window", GeometryCollection()), scale)
+    routing_obstacles_m = unary_union([walls_m, windows_m])
     free_space_m = _free_space(inner_m, walls_m, windows_m, repairs)
 
     rooms: dict[str, Room] = {}
@@ -200,10 +201,16 @@ def build_floor_plan_from_resplan(record: dict[str, Any], config: SolverConfig |
     for room in rooms.values():
         if not room.eligible:
             continue
-        hub_zone = room.polygon_m.difference(walls_m.buffer(config.hub_wall_clearance_m))
+        eligible_interior_m = room.polygon_m.intersection(free_space_m)
+        # A hub is physically installed in free interior space.  Windows are
+        # obstacles just like walls for both free-space construction and wall
+        # clearance, so exclude their buffered geometry from the hub zone too.
+        # Intersecting free space also guards against malformed development
+        # records whose room polygon reaches beyond the inner boundary.
+        hub_zone = eligible_interior_m.difference(routing_obstacles_m.buffer(config.hub_wall_clearance_m))
         hub_zones_m[room.room_id] = hub_zone
         try:
-            point_m = _safe_point(room.polygon_m, walls_m, config.hub_wall_clearance_m)
+            point_m = _safe_point(eligible_interior_m, routing_obstacles_m, config.hub_wall_clearance_m)
         except InputError:
             # A node is fixed input in the competition.  This fallback exists
             # only for ResPlan development records that lack node points; an

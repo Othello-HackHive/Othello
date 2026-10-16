@@ -14,7 +14,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+viz = ["matplotlib>=3.7"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
