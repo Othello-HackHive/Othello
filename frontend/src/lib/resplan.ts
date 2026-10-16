@@ -1,7 +1,7 @@
 /* ResPlan JSON → normalized metric plan model.
- * Drawing units are converted once, at parse time, using the official scale law:
- *   scale = sqrt(plan.inner.area / plan.area)   (metres per drawing unit)
- * so   metres = units * scale,   m2 = units2 * scale^2,   0.5 m clearance = 0.5 / scale units.
+ * Drawing units are converted once. The larger of area and inner.area is the
+ * drawing-unit area; the smaller is the metric floor area. Repository presets
+ * and backend plan files use opposite field layouts.
  */
 
 export type Vec2 = [number, number];
@@ -276,12 +276,8 @@ function extractNodePoints(json: Record<string, unknown>): RawNodePoint[] {
 export function normalizePlan(json: Record<string, unknown>, fallbackName = "UPLOADED_PLAN"): NormalizeResult {
   const warnings: string[] = [];
 
-  /* ---- scale law (slide 4) ----
-   * unitsPerMetre = sqrt(plan.area / plan.inner.area)   [drawing units per metre]
-   *   e.g. 36,000 u² / 110 m² → sqrt(327.3) = 18.09 u/m → 200 units = 11.06 m
-   * So:   metres = units / unitsPerMetre.
-   * plan.area is in drawing units², plan.inner.area is in real m².
-   * (plan.net_area is intentionally ignored — it is 0 in 32% of plans.) */
+  /* scale = sqrt(drawing area / metric area) drawing units per metre;
+   * metres = drawing units / scale. net_area is not used. */
   const declaredUnitsPerM = num(json.scale ?? json.units_per_metre);
   const declaredMPerUnit = num(json.m_per_unit ?? json.metres_per_unit ?? json.meters_per_unit);
   const planArea = num(json.area);
@@ -289,7 +285,7 @@ export function normalizePlan(json: Record<string, unknown>, fallbackName = "UPL
   let mPerUnit: number;
   if (declaredMPerUnit && Number.isFinite(declaredMPerUnit) && declaredMPerUnit > 0) mPerUnit = declaredMPerUnit;
   else if (declaredUnitsPerM && Number.isFinite(declaredUnitsPerM) && declaredUnitsPerM > 0) mPerUnit = 1 / declaredUnitsPerM;
-  else if (planArea && innerArea && planArea > 0 && innerArea > 0) mPerUnit = Math.sqrt(innerArea / planArea);
+  else if (planArea && innerArea && planArea > 0 && innerArea > 0) mPerUnit = Math.sqrt(Math.min(planArea, innerArea) / Math.max(planArea, innerArea));
   else {
     mPerUnit = 1 / 18;
     warnings.push("plan.area / plan.inner.area missing — fallback 18 units/m");
@@ -515,11 +511,11 @@ const rect = (x1: number, y1: number, x2: number, y2: number): Vec2[] => [
 
 const opening = (a: string, b: string, p1: Vec2, p2: Vec2) => ({ rooms: [a, b], contour: [p1, p2] });
 
-/** 1 unit = 40 units/m authored so sqrt(inner/area) = 0.025 exactly. */
+/** Presets use area in drawing units² and inner.area in m² (40 units/m). */
 export const PRESET_JSON: Record<string, Record<string, unknown>> = {
   BENCHMARK_6R: {
     plan_id: "PLAN_0123",
-    source: "Slide 5 / 6-room benchmark",
+    source: "6-room example",
     area: 144000,
     inner: { area: 90 },
     rooms: {

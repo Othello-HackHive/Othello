@@ -1,0 +1,17 @@
+# Keep the Docker build small and free of private or local files.
+.git
+.github
+.aws-sam
+frontend
+data
+out
+docs
+tests
+*.local.*
+*.pkl
+*.pptx
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.venv

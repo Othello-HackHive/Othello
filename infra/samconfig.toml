@@ -1,0 +1,19 @@
+version = 0.1
+
+# Same account style and region as BiteCheck. Secrets (the API key) are never written here:
+# pass them on the command line or let the GitHub deploy workflow pass them (see docs/DEPLOYMENT.md).
+
+[default.global.parameters]
+stack_name = "othello-cable-ring"
+region = "us-east-1"
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+resolve_image_repos = true
+fail_on_empty_changeset = false

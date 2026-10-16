@@ -15,6 +15,7 @@ from othello.io.overlay import overlay_schema_problems
 from othello.models.config import SolverConfig
 from othello.reader.load_plan import InputError
 from othello.run import (
+    PROGRESS_STAGES,
     SUMMARY_COLUMNS,
     find_plan_files,
     main,
@@ -376,3 +377,85 @@ def test_real_search_on_the_seven_room_house_never_submits_anything_unchecked(tm
             outcome.failure.code == "NO_DESIGN_FOUND"
             and not (tmp_path / "SLIDE5_PLAN.json").exists()
         )
+
+
+# --------------------------------------------------- progress steps (for the live view)
+
+
+def collect_events(tmp_path, **kwargs):
+    events = []
+    outcome = run_tiny(tmp_path, progress=events.append, picture=False, **kwargs)
+    return outcome, events
+
+
+def test_a_successful_run_reports_its_steps_in_order(tmp_path):
+    outcome, events = collect_events(
+        tmp_path, optimizer=fake_search(designs.tiny_design())
+    )
+    stages = [e["stage"] for e in events]
+    assert outcome.status == "ok"
+    assert stages == [
+        "started",
+        "loaded",
+        "bound",
+        "searching",
+        "checking",
+        "writing",
+        "done",
+    ]
+    assert stages == [s for s in PROGRESS_STAGES if s in stages]
+    done = events[-1]
+    assert (
+        done["status"] == "ok"
+        and done["hubs"] == 1
+        and done["J"] > 0
+        and done["code"] is None
+    )
+    assert (
+        events[1]["rooms"] == 2
+        and events[2]["lower_bound"] == 1
+        and events[3]["budget_s"] == 20
+    )
+
+
+def test_every_event_is_plain_data_with_a_message_and_a_rising_clock(tmp_path):
+    _, events = collect_events(tmp_path, optimizer=fake_search(designs.tiny_design()))
+    assert json.loads(json.dumps(events)) == events
+    assert all(e["message"] and isinstance(e["elapsed_s"], float) for e in events)
+    assert [e["elapsed_s"] for e in events] == sorted(e["elapsed_s"] for e in events)
+
+
+def test_a_failed_run_still_ends_with_a_done_step_that_says_why(tmp_path):
+    outcome, events = collect_events(
+        tmp_path, optimizer=fake_search(None, verified=False, status="no_design_found")
+    )
+    assert outcome.status == "no_design_found"
+    assert events[-1]["stage"] == "done" and events[-1]["status"] == "no_design_found"
+    assert (
+        events[-1]["code"] == "NO_DESIGN_FOUND" and "no design" in events[-1]["message"]
+    )
+
+
+def test_an_unreadable_plan_reports_start_and_done_only(tmp_path):
+    events = []
+    source = tmp_path / "broken.pkl"
+    source.write_bytes(b"x")
+    run_plan(source, tmp_path / "out", FAST, progress=events.append)
+    assert [e["stage"] for e in events] == ["started", "done"] and events[-1][
+        "status"
+    ] == "failed"
+
+
+def test_a_broken_progress_listener_never_stops_the_run(tmp_path):
+    def broken(event):
+        raise RuntimeError("listener crashed")
+
+    outcome = run_tiny(
+        tmp_path,
+        progress=broken,
+        optimizer=fake_search(designs.tiny_design()),
+        picture=False,
+    )
+    assert outcome.status == "ok" and "progress listener failed" in outcome.files[
+        "log"
+    ].read_text(encoding="utf-8")

@@ -1,0 +1,2 @@
+# Keep the sample uploads byte-for-byte as generated (LF line endings), also on Windows.
+* text eol=lf
