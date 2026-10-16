@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "status": "failed",
+  "plan_id": "SLIDE5_PLAN",
+  "code": "NO_DESIGN_FOUND",
+  "stage": "solve",
+  "message": "no valid design was found",
+  "hint": "try a longer time budget, or check the plan for an impossible room (e.g. one over 100 m2)",
+  "details": {
+    "notes": [
+      "time budget used up at 2 hubs",
+      "3 hubs not finished either"
+    ]
+  },
+  "settings_changed": {
+    "time_budget_s": 60.0
+  },
+  "created_at": "2026-10-16T12:00:00Z"
+}

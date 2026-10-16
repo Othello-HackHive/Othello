@@ -1,0 +1,523 @@
+{
+  "schema_version": 1,
+  "plan_id": "TINY_PLAN",
+  "status": "ok",
+  "valid": true,
+  "units": "m",
+  "scale": 18.0,
+  "bounds": {
+    "min": [
+      0.0,
+      0.0
+    ],
+    "max": [
+      8.0,
+      4.0
+    ]
+  },
+  "geometry": {
+    "inner": [
+      [
+        [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            4.0
+          ],
+          [
+            4.0,
+            4.0
+          ],
+          [
+            8.0,
+            4.0
+          ],
+          [
+            8.0,
+            0.0
+          ],
+          [
+            4.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0
+          ]
+        ]
+      ]
+    ],
+    "walls": [
+      [
+        [
+          [
+            -0.05,
+            4.05
+          ],
+          [
+            4.0,
+            4.05
+          ],
+          [
+            8.05,
+            4.05
+          ],
+          [
+            8.05,
+            0.0
+          ],
+          [
+            8.0,
+            0.0
+          ],
+          [
+            8.0,
+            -0.05
+          ],
+          [
+            4.0,
+            -0.05
+          ],
+          [
+            -0.05,
+            -0.05
+          ],
+          [
+            -0.05,
+            4.05
+          ]
+        ],
+        [
+          [
+            3.95,
+            0.05
+          ],
+          [
+            3.95,
+            1.5
+          ],
+          [
+            4.05,
+            1.5
+          ],
+          [
+            4.05,
+            0.05
+          ],
+          [
+            7.95,
+            0.05
+          ],
+          [
+            7.95,
+            3.95
+          ],
+          [
+            4.05,
+            3.95
+          ],
+          [
+            4.05,
+            2.5
+          ],
+          [
+            3.95,
+            2.5
+          ],
+          [
+            3.95,
+            3.95
+          ],
+          [
+            0.05,
+            3.95
+          ],
+          [
+            0.05,
+            0.05
+          ],
+          [
+            3.95,
+            0.05
+          ]
+        ]
+      ]
+    ],
+    "windows": [],
+    "rooms": [
+      {
+        "room_id": "R01",
+        "kind": "living",
+        "eligible": true,
+        "inside_inner": true,
+        "area_m2": 16.0,
+        "hub_id": "H1",
+        "polygon": [
+          [
+            4.0,
+            0.0
+          ],
+          [
+            4.0,
+            4.0
+          ],
+          [
+            0.0,
+            4.0
+          ],
+          [
+            0.0,
+            0.0
+          ],
+          [
+            4.0,
+            0.0
+          ]
+        ],
+        "polygons": [
+          [
+            [
+              [
+                4.0,
+                0.0
+              ],
+              [
+                4.0,
+                4.0
+              ],
+              [
+                0.0,
+                4.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                4.0,
+                0.0
+              ]
+            ]
+          ]
+        ]
+      },
+      {
+        "room_id": "R02",
+        "kind": "bedroom",
+        "eligible": true,
+        "inside_inner": true,
+        "area_m2": 16.0,
+        "hub_id": "H1",
+        "polygon": [
+          [
+            8.0,
+            0.0
+          ],
+          [
+            8.0,
+            4.0
+          ],
+          [
+            4.0,
+            4.0
+          ],
+          [
+            4.0,
+            0.0
+          ],
+          [
+            8.0,
+            0.0
+          ]
+        ],
+        "polygons": [
+          [
+            [
+              [
+                8.0,
+                0.0
+              ],
+              [
+                8.0,
+                4.0
+              ],
+              [
+                4.0,
+                4.0
+              ],
+              [
+                4.0,
+                0.0
+              ],
+              [
+                8.0,
+                0.0
+              ]
+            ]
+          ]
+        ]
+      }
+    ],
+    "openings": [
+      {
+        "opening_id": "D1",
+        "kind": "door",
+        "rooms": [
+          "R01",
+          "R02"
+        ],
+        "gap": [
+          [
+            4.0,
+            1.5
+          ],
+          [
+            4.0,
+            2.5
+          ]
+        ],
+        "counts_for_zone": true
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "node_id": "N1",
+      "room_id": "R01",
+      "point": [
+        2.0,
+        2.0
+      ],
+      "hub_id": "H1",
+      "order": 1
+    },
+    {
+      "node_id": "N2",
+      "room_id": "R02",
+      "point": [
+        6.0,
+        2.0
+      ],
+      "hub_id": "H1",
+      "order": 2
+    }
+  ],
+  "hubs": [
+    {
+      "hub_id": "H1",
+      "room_id": "R01",
+      "point": [
+        3.0,
+        3.0
+      ],
+      "color_index": 0,
+      "rooms": [
+        "R01",
+        "R02"
+      ],
+      "nodes": [
+        "N1",
+        "N2"
+      ],
+      "sequence": [
+        "H1",
+        "N1",
+        "N2",
+        "H1"
+      ],
+      "ring_length_m": 10.0,
+      "area_m2": 32.0,
+      "legs": [
+        {
+          "from": "H1",
+          "to": "N1",
+          "order": 1,
+          "length_m": 2.0,
+          "polyline": [
+            [
+              3.0,
+              3.0
+            ],
+            [
+              2.0,
+              3.0
+            ],
+            [
+              2.0,
+              2.0
+            ]
+          ],
+          "doors_used": []
+        },
+        {
+          "from": "N1",
+          "to": "N2",
+          "order": 2,
+          "length_m": 4.0,
+          "polyline": [
+            [
+              2.0,
+              2.0
+            ],
+            [
+              6.0,
+              2.0
+            ]
+          ],
+          "doors_used": []
+        },
+        {
+          "from": "N2",
+          "to": "H1",
+          "order": 3,
+          "length_m": 4.0,
+          "polyline": [
+            [
+              6.0,
+              2.0
+            ],
+            [
+              6.0,
+              2.3
+            ],
+            [
+              3.0,
+              2.3
+            ],
+            [
+              3.0,
+              3.0
+            ]
+          ],
+          "doors_used": []
+        }
+      ]
+    }
+  ],
+  "violations": [],
+  "markers": {
+    "crossings": [],
+    "overlaps": [],
+    "bends": [
+      [
+        2.0,
+        3.0
+      ],
+      [
+        2.0,
+        2.0
+      ],
+      [
+        6.0,
+        2.0
+      ],
+      [
+        6.0,
+        2.3
+      ],
+      [
+        3.0,
+        2.3
+      ],
+      [
+        3.0,
+        3.0
+      ]
+    ]
+  },
+  "metrics": {
+    "hub_count": 1,
+    "L": 10.0,
+    "X": 0,
+    "O": 0.0,
+    "B": 6,
+    "J": 13.0,
+    "area_gap_m2": 0.0,
+    "per_hub": {
+      "H1": {
+        "ring_length_m": 10.0,
+        "bends": 6,
+        "node_count": 2,
+        "area_m2": 32.0
+      }
+    }
+  },
+  "checks": [
+    {
+      "rule_id": "schema",
+      "label": "OUTPUT FORMAT",
+      "passed": true,
+      "value": "OK",
+      "detail": "ids and lists are filled in consistently"
+    },
+    {
+      "rule_id": "coverage",
+      "label": "COVERAGE",
+      "passed": true,
+      "value": "2/2 ROOMS \u00b7 2/2 NODES",
+      "detail": "every eligible room and node belongs to exactly one hub"
+    },
+    {
+      "rule_id": "capacity",
+      "label": "CAPACITY",
+      "passed": true,
+      "value": "2/5 NODES \u00b7 32.0/100 M2",
+      "detail": "each hub has few enough nodes and little enough floor area"
+    },
+    {
+      "rule_id": "zones",
+      "label": "ZONE CONTIGUITY",
+      "passed": true,
+      "value": "ALL CONNECTED",
+      "detail": "each hub's rooms are joined through doors or open passages"
+    },
+    {
+      "rule_id": "hub_points",
+      "label": "HUB CLEARANCE",
+      "passed": true,
+      "value": "0.95 M FROM WALLS",
+      "detail": "each hub sits in its own room, away from the walls"
+    },
+    {
+      "rule_id": "rings",
+      "label": "RING CLOSURE",
+      "passed": true,
+      "value": "1/1 CLOSED",
+      "detail": "each ring is closed, visits every node once and returns to its own hub"
+    },
+    {
+      "rule_id": "nodes",
+      "label": "NODE POSITIONS",
+      "passed": true,
+      "value": "ON POINT",
+      "detail": "the cable meets every node exactly where the plan put it"
+    },
+    {
+      "rule_id": "free_space",
+      "label": "FREE SPACE",
+      "passed": true,
+      "value": "CLEAR",
+      "detail": "straight pieces only, inside the house, never through walls or windows"
+    },
+    {
+      "rule_id": "doors",
+      "label": "DOOR PASSAGE",
+      "passed": true,
+      "value": "ONLY VIA DOORS",
+      "detail": "the cable changes room only through a door or open passage"
+    }
+  ],
+  "bounds_report": {
+    "lower_bound_hubs": 1,
+    "proven_minimum": true,
+    "tried": {
+      "1": "feasible"
+    }
+  },
+  "runtime_s": null,
+  "notes": [],
+  "settings_changed": {}
+}

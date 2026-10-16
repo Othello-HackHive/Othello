@@ -34,6 +34,7 @@ def test_it_lints_the_part_two_files_and_runs_every_test():
         "src/othello/io",
         "tests/fixtures",
         "tests/mutations.py",
+        "tests/make_samples.py",
         "tests/test_part2_*.py",
     ):
         assert path in body
