@@ -32,6 +32,7 @@ htmlcov/
 
 # --- Datasets and organiser files (not committed) ---
 data/
+!tests/data/
 datasets/
 *.pkl
 *.pickle
@@ -53,6 +54,9 @@ runs/
 summary.csv
 *.png
 !docs/**/*.png
+# ...but the committed sample files for the frontend are real, wanted files
+!tests/data/samples/**/*.overlay.json
+!tests/data/samples/**/*.failure.json
 
 # --- Logs and temp ---
 *.log
