@@ -167,7 +167,7 @@ Ritvik's frontend reads files only:
 
 The field-by-field description of the overlay is [OVERLAY_FORMAT.md](OVERLAY_FORMAT.md); real example folders are in `tests/data/samples/`.
 
-The frontend never calls solver code. If it wants to run a plan from the UI, it calls the runner (`run_plan`) through whatever thin wrapper the team agrees on later. A wrapper is not part of v1.
+The frontend never calls solver code. To run a plan from the UI it uses the web API ([API.md](API.md)): upload a plan, poll the progress steps, read the same result files. The API runs the same `run_plan` described in section 6, one job per upload.
 
 ## 8. State kept during a run
 
