@@ -299,7 +299,9 @@ def _solve_and_write(
     result = optimizer(
         plan, batches, config, checker, None, search_deadline, lower_bound
     )
-    for line in result.diagnostics:
+    for line in dict.fromkeys(
+        result.diagnostics
+    ):  # the solver repeats itself; keep each message once
         log.info("solver: %s", line)
         outcome.notes.append(line)
     summary = result.hub_count_status
