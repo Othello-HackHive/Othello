@@ -29,7 +29,13 @@ def test_it_has_no_path_filters_that_could_leave_a_required_check_pending():
 
 def test_it_lints_the_part_two_files_and_runs_every_test():
     body = text()
-    for path in ("src/othello/checker", "src/othello/io", "tests/fixtures", "tests/test_part2_*.py"):
+    for path in (
+        "src/othello/checker",
+        "src/othello/io",
+        "tests/fixtures",
+        "tests/mutations.py",
+        "tests/test_part2_*.py",
+    ):
         assert path in body
     assert "python -m pytest -q" in body
 
