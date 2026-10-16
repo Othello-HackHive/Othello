@@ -75,6 +75,22 @@ def test_development_node_survives_an_empty_hub_zone():
     assert plan.hub_zones_m["R01"].is_empty
 
 
+def test_hub_zone_and_development_node_exclude_window_clearance():
+    record = sample_record()
+    record["window"] = rectangle(20, 20, 30, 30)
+    plan = build_floor_plan_from_resplan(record)
+    window_m = plan.windows_m.buffer(0.5)
+    assert plan.hub_zones_m["R01"].intersection(window_m).area <= 1e-12
+    assert plan.free_space_m.covers(plan.hub_zones_m["R01"])
+
+
+def test_hub_zone_is_clipped_to_the_inner_free_space():
+    record = sample_record()
+    record["living"] = rectangle(-10, 0, 50, 50)
+    plan = build_floor_plan_from_resplan(record)
+    assert plan.free_space_m.covers(plan.hub_zones_m["R01"])
+
+
 def test_geometry_verified_open_passage_is_a_zone_link():
     record = sample_record()
     record["wall_depth"] = 2.0
