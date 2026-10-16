@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from othello.checker.validate import check_design
+from othello.io.errors import OthelloError
 from othello.models.config import SolverConfig
 from othello.models.design import Design, Hub, Ring, RouteLeg
 from othello.models.plan import Coord, FloorPlan
@@ -50,13 +51,17 @@ SEGMENT_KEYS = ("from", "to", "length_m", "polyline")
 METRIC_KEYS = ("hub_count", "total_length_m")
 
 
-class UnverifiedDesignError(Exception):
+class UnverifiedDesignError(OthelloError):
     """The design did not pass the checker, so no official file was written."""
 
+    code = "DESIGN_INVALID"
+    stage = "check"
+    hint = "the solver produced a design that breaks a rule; see the violations"
+
     def __init__(self, violations: list[Violation]):
-        self.violations = violations
         kinds = sorted({v.type for v in violations})
         super().__init__(f"design is not valid ({len(violations)} violations: {', '.join(kinds)})")
+        self.violations = violations
 
 
 # ------------------------------------------------------------ coordinates

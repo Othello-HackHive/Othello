@@ -27,6 +27,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from othello.io.errors import OthelloError
 from othello.models.config import SolverConfig
 
 ENV_PREFIX = "OTHELLO_"
@@ -35,8 +36,12 @@ TRANSIT_POLICIES = ("forbid", "avoid_if_possible", "allow")
 TIEBREAK_DEFINITIONS = ("max_minus_min",)
 
 
-class ConfigError(ValueError):
+class ConfigError(OthelloError, ValueError):
     """The settings are wrong (unknown name, bad value, unreadable file)."""
+
+    code = "BAD_SETTINGS"
+    stage = "settings"
+    hint = "check the setting name and value (see the message for the exact one)"
 
 
 # ---------------------------------------------------------------- merging
