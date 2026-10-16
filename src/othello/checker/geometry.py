@@ -42,7 +42,11 @@ def is_axis_aligned(p: Coord, q: Coord, tol: float = DEFAULT_TOL) -> bool:
 
 def non_axis_segments(polyline: list[Coord], tol: float = DEFAULT_TOL) -> list[int]:
     """Positions of the pieces that are slanted."""
-    return [i for i, (p, q) in enumerate(itertools.pairwise(polyline)) if not is_axis_aligned(p, q, tol)]
+    return [
+        i
+        for i, (p, q) in enumerate(itertools.pairwise(polyline))
+        if not is_axis_aligned(p, q, tol)
+    ]
 
 
 def merge_collinear(polyline: list[Coord], tol: float = DEFAULT_TOL) -> list[Coord]:
@@ -59,11 +63,18 @@ def point_in_polygon(point: Coord, polygon: Any, tol: float = DEFAULT_TOL) -> bo
 
 
 def distance_to(point: Coord, geometry: Any) -> float:
-    """How far the point is from the nearest part of a shape (0 if on or inside it)."""
+    """How far the point is from the nearest part of a shape (0 if on or inside it).
+
+    An empty shape (a plan with no walls, or no windows) is infinitely far away.
+    """
+    if geometry is None or geometry.is_empty:
+        return float("inf")
     return float(Point(point).distance(geometry))
 
 
-def has_clearance(point: Coord, walls: Any, minimum: float = 0.5, tol: float = DEFAULT_TOL) -> bool:
+def has_clearance(
+    point: Coord, walls: Any, minimum: float = 0.5, tol: float = DEFAULT_TOL
+) -> bool:
     """Is the point at least ``minimum`` metres away from every wall?"""
     return distance_to(point, walls) >= minimum - tol
 

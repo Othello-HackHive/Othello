@@ -1,0 +1,87 @@
+name: Deploy
+
+# Deploys the solver's web API to AWS after the CI run on main succeeded (or by hand from the Actions tab).
+# Nothing happens until the one-time AWS setup is done and the repository variable
+# AWS_DEPLOY_ROLE_ARN exists (see docs/DEPLOYMENT.md). No AWS password is stored anywhere:
+# GitHub proves its identity with a short-lived token and AWS hands back temporary permissions.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+# Never two deploys at once, and never cancel one halfway through.
+concurrency:
+  group: deploy-aws
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # lets the job ask GitHub for the short-lived identity token
+
+env:
+  AWS_REGION: us-east-1
+  STACK_NAME: othello-cable-ring
+
+jobs:
+  deploy:
+    name: Deploy to AWS
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Only after a green CI run on main (or a manual start), and only once the AWS role is configured.
+    if: >
+      vars.AWS_DEPLOY_ROLE_ARN != '' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
+    steps:
+      - name: Get the code that CI tested
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up the AWS SAM tool
+        uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: Sign in to AWS with the temporary identity
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Build the container images
+        run: sam build --template-file infra/template.yaml
+
+      - name: Deploy
+        env:
+          ALLOWED_ORIGINS: ${{ vars.ALLOWED_ORIGINS }}
+          OTHELLO_API_KEY: ${{ secrets.OTHELLO_API_KEY }}
+          WORKER_CONCURRENCY: ${{ vars.WORKER_CONCURRENCY }}
+        run: |
+          sam deploy \
+            --config-file infra/samconfig.toml \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              "AllowedOrigins=${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173}" \
+              "ApiKey=${OTHELLO_API_KEY}" \
+              "WorkerConcurrency=${WORKER_CONCURRENCY:-0}"
+
+      - name: Check that the API answers
+        run: |
+          url=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text)
+          echo "API address: $url"
+          for attempt in 1 2 3 4 5; do
+            if curl --fail --silent --show-error "$url/health"; then echo; exit 0; fi
+            sleep 5
+          done
+          echo "The API did not answer /health" >&2
+          exit 1
