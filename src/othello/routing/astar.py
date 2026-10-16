@@ -198,7 +198,8 @@ def _reconstruct(parents, initial_state, goal_state, start, goal,
 
 
 def astar_route(graph, start: Coord, goal: Coord, config, deadline: float | None = None,
-                initial_direction: Direction | None = None) -> RouteSearchResult:
+                initial_direction: Direction | None = None,
+                edge_penalty: Any = None) -> RouteSearchResult:
     """Minimize weighted length plus bends for one leg on a validated graph.
 
     The caller must use a Task 3.1 ready graph selected for this same endpoint
@@ -213,6 +214,8 @@ def astar_route(graph, start: Coord, goal: Coord, config, deadline: float | None
     travel directions and zero cost, even when an initial heading is supplied.
     """
     try:
+        if edge_penalty is not None and not callable(edge_penalty):
+            raise ValueError("edge_penalty must be callable")
         adjacency, length_weight, bend_weight = _validate(
             graph, start, goal, config, deadline, initial_direction)
 
@@ -237,7 +240,12 @@ def astar_route(graph, start: Coord, goal: Coord, config, deadline: float | None
             for arc in adjacency[vertex]:
                 _check_deadline(deadline, "relaxation")
                 turn = int(incoming is not None and incoming != arc.direction)
-                candidate = _finite_cost(current_cost + length_weight * arc.length_m + bend_weight * turn)
+                penalty = 0.0 if edge_penalty is None else _finite_number(
+                    edge_penalty(vertex, arc.target), "edge penalty")
+                if penalty < 0:
+                    raise ValueError("edge penalty must be nonnegative")
+                candidate = _finite_cost(current_cost + length_weight * arc.length_m + bend_weight * turn
+                                         + penalty)
                 next_state = (arc.target, arc.direction)
                 if candidate < best.get(next_state, float("inf")):
                     best[next_state] = candidate
@@ -245,6 +253,44 @@ def astar_route(graph, start: Coord, goal: Coord, config, deadline: float | None
                     h = heuristic(arc.target)
                     heappush(frontier, (_finite_cost(candidate + h), h, next(serial), candidate, next_state))
         _check_deadline(deadline, "completion")
+        return RouteSearchResult("unreachable", diagnostics=(
+            "Direction-expanded search exhausted on the supplied graph; not proven geometric infeasibility.",))
+    except _TimedOut as error:
+        return RouteSearchResult("timeout", diagnostics=(str(error),))
+
+
+def fewest_bends_then_length(graph, start: Coord, goal: Coord,
+                            deadline: float | None = None,
+                            initial_direction: Direction | None = None) -> RouteSearchResult:
+    """Minimize (bends, metres) exactly, with deterministic graph traversal."""
+    from types import SimpleNamespace
+
+    try:
+        config = SimpleNamespace(weights=SimpleNamespace(length=0.0, bend=1.0))
+        adjacency, _, _ = _validate(graph, start, goal, config, deadline, initial_direction)
+        initial_state = (start, initial_direction)
+        best = {initial_state: (0, 0.0)}
+        parents = {}
+        serial = count()
+        frontier = [(0, 0.0, next(serial), initial_state)]
+        while frontier:
+            _check_deadline(deadline, "fewest-bends expansion")
+            bends, length, _, state = heappop(frontier)
+            if (bends, length) != best[state]:
+                continue
+            vertex, incoming = state
+            if vertex == goal:
+                return _reconstruct(parents, initial_state, state, start, goal,
+                                    0.0, 1.0, deadline)
+            for arc in adjacency[vertex]:
+                _check_deadline(deadline, "fewest-bends relaxation")
+                candidate = (bends + int(incoming is not None and incoming != arc.direction),
+                             _finite_cost(length + arc.length_m))
+                next_state = (arc.target, arc.direction)
+                if candidate < best.get(next_state, (float("inf"), float("inf"))):
+                    best[next_state] = candidate
+                    parents[next_state] = (state, arc)
+                    heappush(frontier, (*candidate, next(serial), next_state))
         return RouteSearchResult("unreachable", diagnostics=(
             "Direction-expanded search exhausted on the supplied graph; not proven geometric infeasibility.",))
     except _TimedOut as error:

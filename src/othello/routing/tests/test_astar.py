@@ -11,6 +11,19 @@ from shapely.geometry import LineString, box
 
 from othello.routing import RouteSearchResult, astar_route, build_routing_graph
 from othello.routing import astar
+
+
+def test_fewest_bends_breaks_ties_by_shorter_length():
+    graph = nx.DiGraph()
+    for y in (-3, -1):
+        points = [(0, 0), (0, y), (4, y), (4, 0)]
+        for start, end in zip(points, points[1:]):
+            add_arc(graph, start, end)
+    result = astar.fewest_bends_then_length(graph, (0, 0), (4, 0))
+    assert result.status == "success"
+    assert result.internal_bends == 2
+    assert result.length_m == 6
+    assert result.polyline == [(0, 0), (0, -1), (4, -1), (4, 0)]
 from conftest import make_config, make_opening, make_plan, make_room
 
 VECTORS = {"E": (1, 0), "W": (-1, 0), "N": (0, 1), "S": (0, -1)}

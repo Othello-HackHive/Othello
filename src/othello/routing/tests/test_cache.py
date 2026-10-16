@@ -252,6 +252,26 @@ def test_avoid_if_possible_strict_leg_isolation():
     assert gk_leg2.leg == ("H1", "N2")
 
 
+def test_shared_hanan_key_is_distinct_and_respects_lru_and_invalidation():
+    cache = RoutingCache(max_graphs=2)
+    terminals = (("A", (1.0, 1.0)), ("B", (2.0, 1.0)), ("C", (3.0, 1.0)))
+    shared = GraphKey("P:sig", "forbid", 0.02, 1.0, 0.001, terminals, None)
+    fallback = GraphKey("P:sig", "forbid", 0.02, 1.0, 0.001, terminals, ("A", "C"))
+    other = GraphKey("P:changed", "forbid", 0.02, 1.0, 0.001, terminals, None)
+    graph = ValidatedGraph({}, frozenset(), 0, 0)
+    cache.put_graph(shared, graph)
+    cache.put_graph(fallback, graph)
+    assert shared != fallback
+    assert PathKey(shared, (1.0, 1.0), (3.0, 1.0), None, 1.0, 0.5) != PathKey(
+        fallback, (1.0, 1.0), (3.0, 1.0), None, 1.0, 0.5)
+    assert cache.get_graph(shared) is graph
+    cache.put_graph(other, graph)
+    assert cache.get_graph(fallback) is None  # Least recently used entry was evicted.
+    assert cache.get_graph(shared) is graph
+    cache.invalidate("P")
+    assert cache.get_graph(shared) is None and cache.get_graph(other) is None
+
+
 def test_invalidate_plan_id_selective_clear():
     cache = RoutingCache()
     gk_a = GraphKey("planA:123", "forbid", 0.02, 1.0, 0.001, (), None)

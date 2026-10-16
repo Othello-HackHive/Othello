@@ -15,10 +15,11 @@ from shapely.ops import unary_union
 from othello.routing import DistanceTable, RoutingCache
 from othello.routing.astar import _TimedOut as _RoutingTimedOut
 
-from .hub_candidates import generate_hub_candidates
+from .hub_candidates import HubCandidateLimitError, generate_hub_candidates
+from .candidate_tables import candidate_tables
 from .node_orders import enumerate_visiting_orders
 from .outer import _design_key
-from .route_selection import _score_of_verified, select_whole_design_routes
+from .route_selection import _invoke_checker, select_whole_design_routes
 from .types import ImprovementResult
 
 
@@ -27,6 +28,10 @@ class _Expired(Exception):
 
 
 class _Unsupported(Exception):
+    pass
+
+
+class _CandidateConfiguration(Exception):
     pass
 
 
@@ -162,10 +167,11 @@ def improve_design(
     initial_key: tuple | None = None
     checked: dict[tuple, Any] = {}
     diagnostics: list[str] = []
+    checker_failures = 0
     moves_considered = 0
 
     def verified_checker(check_plan: Any, candidate: dict, check_config: Any) -> Any:
-        nonlocal incumbent, best_key
+        nonlocal incumbent, best_key, checker_failures
         _validate_design(plan, candidate)
         if _assignments(candidate) != assigned:
             raise ValueError("local move changed hub count or assigned rooms and nodes")
@@ -173,8 +179,13 @@ def improve_design(
         if signature in checked:
             return checked[signature]
         _check(effective)
-        result = checker(check_plan, candidate, check_config)
-        score = _score_of_verified(result)
+        result, score, failure = _invoke_checker(checker, check_plan, candidate, check_config)
+        if failure is not None:
+            checker_failures += 1
+            if checker_failures <= 3:
+                diagnostics.append(f"checker invocation {checker_failures}: {failure}")
+            _check(effective)
+            return SimpleNamespace(valid=False, metrics=None)
         checked[signature] = result
         if score is not None:
             key = (len(candidate["hubs"]), score, signature)
@@ -207,6 +218,9 @@ def improve_design(
             verified_checker(plan, selected.design, config)
         elif selected.status not in {"verified", "no_verified_design", "unreachable_on_grid"}:
             diagnostics.append(f"Route selection: {selected.status}: {'; '.join(selected.diagnostics)}")
+        if selected.status in {"verified", "no_verified_design"}:
+            diagnostics.extend(f"Route selection: {detail}" for detail in selected.diagnostics
+                               if "checker" in detail.lower())
         return selected.status
 
     failure: str | None = None
@@ -250,19 +264,22 @@ def improve_design(
             territory = SimpleNamespace(territory_id=hub_id,
                                         room_ids=tuple(hub["assigned_rooms"]),
                                         node_ids=tuple(hub["assigned_nodes"]), hub_zone_m=zone)
-            candidates = generate_hub_candidates(plan, territory, config, effective)
+            try:
+                candidates = generate_hub_candidates(plan, territory, config, effective)
+            except HubCandidateLimitError as exc:
+                _check(effective)
+                raise _CandidateConfiguration(f"{hub_id}: {exc}") from exc
             if candidates.status == "timeout":
                 raise _Expired
             if candidates.status == "unsupported_geometry":
                 raise _Unsupported("; ".join(candidates.diagnostics))
             if candidates.status == "no_candidates":
                 diagnostics.append(f"{hub_id}: no sampled alternative hub position")
-            for candidate in candidates.candidates:
+            for candidate, table in candidate_tables(plan, hub_id, hub["assigned_nodes"],
+                                                     candidates.candidates, config, route_cache, effective):
                 _check(effective)
                 if candidate.room_id == hub["room_id"] and candidate.point_m == location:
                     continue
-                table = DistanceTable(plan, _stops(plan, hub, candidate.point_m), config,
-                                      route_cache, effective)
                 replacement = _routed_hub(hub, candidate.room_id, candidate.point_m,
                                           sequence, table, effective)
                 if replacement is not None:
@@ -276,6 +293,12 @@ def improve_design(
     except _Unsupported as exc:
         failure = "unsupported_geometry"
         diagnostics.append(str(exc))
+    except _CandidateConfiguration as exc:
+        failure = "candidate_configuration_error"
+        diagnostics.append(str(exc))
+
+    if checker_failures > 3:
+        diagnostics.append(f"{checker_failures - 3} additional checker failures")
 
     if failure is not None:
         status = failure

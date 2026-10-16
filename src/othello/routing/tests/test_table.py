@@ -119,7 +119,8 @@ def test_coincident_stops_preserves_node_visitation():
 
 
 @pytest.mark.parametrize("policy", ["forbid", "allow", "avoid_if_possible"])
-def test_graph_cache_respects_pair_dependent_fallback_for_every_policy(policy):
+@pytest.mark.parametrize("fallback_first", [False, True])
+def test_graph_cache_respects_pair_dependent_fallback_for_every_policy(policy, fallback_first):
     # A concave plan separates the lower arms. The first leg stays in the
     # left arm on the Hanan lines; the second needs fallback y=5 to detour.
     inner = Polygon([(0, 0), (2, 0), (2, 4), (4, 4), (4, 0), (6, 0), (6, 6), (0, 6)])
@@ -135,15 +136,303 @@ def test_graph_cache_respects_pair_dependent_fallback_for_every_policy(policy):
 
     cache = RoutingCache()
     table = DistanceTable(plan, stops, cfg, cache)
-    assert table.get_route("A", "B").status == "success"
-    cached_sequence_result = table.get_route("A", "C")
-    clean_result = DistanceTable(plan, stops, cfg, RoutingCache()).get_route("A", "C")
+    order = ("C", "B") if fallback_first else ("B", "C")
+    for target in order:
+        cached = table.get_route("A", target)
+        clean = DistanceTable(plan, stops, cfg, RoutingCache()).get_route("A", target)
+        assert cached == clean
+        assert cached.status == "success"
+    assert {key.leg for key in cache._graphs} == {None, ("A", "C")}
+    assert any(key.stage is not None and key.stage[1] for key in cache._graphs)
+    assert cache.stats().graph_count >= 3
 
-    assert cached_sequence_result == clean_result
-    assert cached_sequence_result.status == "success"
-    assert cache.stats().graph_misses == 2
-    assert cache.stats().graph_hits == 0
-    assert {key.leg for key in cache._graphs} == {("A", "B"), ("A", "C")}
+
+def test_shared_hanan_graph_reuses_one_build_across_distinct_legs(monkeypatch):
+    from othello.routing import table as table_module
+
+    plan = make_plan(inner=box(0, 0, 10, 10))
+    stops = {"A": (1, 1), "B": (3, 2), "C": (6, 4), "D": (8, 7)}
+    cfg = make_config(cable_transit_policy="avoid_if_possible",
+                      weights=SimpleNamespace(length=1.0, bend=0.5))
+    original = table_module.build_routing_graph
+    builds = []
+
+    def count(*args, **kwargs):
+        builds.append((args[2], args[3]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(table_module, "build_routing_graph", count)
+    cache = RoutingCache()
+    table = DistanceTable(plan, stops, cfg, cache)
+    legs = [("A", "B"), ("B", "C"), ("C", "D"), ("D", "A")]
+    for source, target in legs:
+        route = table.get_route(source, target)
+        assert route == DistanceTable(plan, stops, cfg, RoutingCache()).get_route(source, target)
+    # Fresh comparisons also use the spy, so only one of the warm table's four
+    # queries should have required a build.
+    assert builds == [legs[0], *legs]
+    assert {key.leg for key in cache._graphs} == {None}
+    assert cache.stats().graph_hits >= len(legs) - 1
+
+
+def test_completed_fallback_graph_is_reused_for_another_leg(monkeypatch):
+    from othello.routing import table as table_module
+
+    inner = Polygon([(0, 0), (2, 0), (2, 4), (4, 4), (4, 0), (6, 0), (6, 6), (0, 6)])
+    plan = make_plan(inner=inner)
+    stops = {"A": (1.123, 1.321), "B": (1.523, 1.321), "C": (5.321, 1.321)}
+    cfg = make_config(grid_step_m=1.0, cable_transit_policy="forbid",
+                      weights=SimpleNamespace(length=1.0, bend=0.5))
+    original = table_module.build_routing_graph
+    builds = []
+
+    def counted(*args, **kwargs):
+        builds.append((args[2], args[3]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(table_module, "build_routing_graph", counted)
+    cache = RoutingCache()
+    table = DistanceTable(plan, stops, cfg, cache)
+    assert table.get_route("A", "C").status == "success"
+    assert table.get_route("B", "C").status == "success"
+    assert builds == [("A", "C")]
+    assert any(key.stage == ("permitted_only", True) for key in cache._graphs)
+
+
+def test_avoid_policy_does_not_share_relaxed_graph_with_permitted_detour():
+    from conftest import make_opening
+
+    rooms = [make_room("R1", box(0, 0, 3, 6)),
+             make_room("X", box(3, 0, 7, 6), excluded=True),
+             make_room("R2", box(7, 0, 10, 6)),
+             make_room("R3", box(0, 6, 10, 10)),
+             make_room("R4", box(3, -3, 7, 0))]
+    openings = [make_opening("D1", ["R1", "X"], [(3, 1), (3, 3)]),
+                make_opening("D2", ["X", "R2"], [(7, 1), (7, 3)]),
+                make_opening("D3", ["X", "R4"], [(4, 0), (6, 0)]),
+                make_opening("P1", ["R1", "R3"], [(1, 6), (2, 6)], "open_passage"),
+                make_opening("P2", ["R2", "R3"], [(8, 6), (9, 6)], "open_passage")]
+    plan = make_plan(inner=box(0, -3, 10, 10), rooms=rooms,
+                     openings=openings, excluded=["X"])
+    stops = {"A": (1, 2), "B": (9, 2), "C": (5, -2), "D": (2, 2)}
+    cfg = make_config(grid_step_m=1.0, cable_transit_policy="avoid_if_possible",
+                      weights=SimpleNamespace(length=1.0, bend=0.5))
+    cache = RoutingCache()
+    table = DistanceTable(plan, stops, cfg, cache)
+    relaxed = table.get_route("A", "C")
+    assert relaxed.status == "success" and relaxed.opening_ids == ("D1", "D3")
+    assert not any(key.leg is None and key.stage is None for key in cache._graphs)
+    permitted = table.get_route("A", "B")
+    assert permitted == DistanceTable(plan, stops, cfg, RoutingCache()).get_route("A", "B")
+    assert permitted.status == "success" and permitted.opening_ids == ("P1", "P2")
+    assert permitted.length_m > relaxed.length_m
+    assert not any(key.leg is None and key.stage is None for key in cache._graphs)  # Fallback stage.
+    local = table.get_route("A", "D")
+    assert local.status == "success" and local.opening_ids == ()
+    assert None in {key.leg for key in cache._graphs}
+    assert table.get_route("A", "B") == permitted
+    # In the opposite order, the shared restricted Hanan graph is insufficient;
+    # the leg must complete restricted fallback before considering X.
+    cache2 = RoutingCache()
+    table2 = DistanceTable(plan, stops, cfg, cache2)
+    assert table2.get_route("A", "D") == local
+    assert table2.get_route("A", "B") == permitted
+    assert {key.leg for key in cache2._graphs} == {None, ("A", "B")}
+
+
+@pytest.mark.parametrize("obstacle", ["walls", "windows"])
+def test_warm_shared_graph_does_not_validate_blocked_coincident_terminal(obstacle):
+    plan = make_plan(inner=box(0, 0, 10, 10), **{obstacle: box(4, 4, 6, 6)})
+    stops = {"A": (1, 1), "B": (2, 1), "X": (5, 5), "Y": (5, 5)}
+    cfg = make_config(cable_transit_policy="forbid",
+                      weights=SimpleNamespace(length=1.0, bend=0.5))
+    cache = RoutingCache()
+    table = DistanceTable(plan, stops, cfg, cache)
+    assert table.get_route("A", "B").status == "success"
+    assert None in {key.leg for key in cache._graphs}
+    for source, target in (("X", "X"), ("X", "Y")):
+        result = table.get_route(source, target)
+        assert result.status == "unreachable_on_grid"
+        assert result == DistanceTable(plan, stops, cfg, RoutingCache()).get_route(source, target)
+
+
+def test_shared_connectivity_timeout_does_not_cache_a_negative_route(monkeypatch):
+    from othello.routing import table as table_module
+
+    plan = make_plan(inner=box(0, 0, 10, 10))
+    stops = {"A": (1, 1), "B": (2, 1), "C": (9, 9)}
+    cfg = make_config(weights=SimpleNamespace(length=1.0, bend=0.5))
+    clock = {"now": 0.0}
+    monkeypatch.setattr(table_module.time, "monotonic", lambda: clock["now"])
+    cache = RoutingCache()
+    table = DistanceTable(plan, stops, cfg, cache, deadline=10.0)
+    assert table.get_route("A", "B").status == "success"
+    original = table_module._shared_reaches
+
+    def expire_during_reachability(graph, start, goal, deadline):
+        clock["now"] = deadline
+        return original(graph, start, goal, deadline)
+
+    monkeypatch.setattr(table_module, "_shared_reaches", expire_during_reachability)
+    timed_out = table.get_route("A", "C")
+    assert timed_out.status == "timeout"
+    assert timed_out.polyline is None
+    assert cache.stats().path_count == 1
+    clock["now"] = 0.0
+    monkeypatch.setattr(table_module, "_shared_reaches", original)
+    assert DistanceTable(plan, stops, cfg, cache, deadline=100.0).get_route("A", "C").status == "success"
+
+
+def test_timeout_during_leg_recovery_never_caches_disconnection(monkeypatch):
+    from othello.routing import table as table_module
+
+    inner = Polygon([(0, 0), (2, 0), (2, 4), (4, 4), (4, 0), (6, 0), (6, 6), (0, 6)])
+    plan = make_plan(inner=inner)
+    stops = {"A": (1.123, 1.321), "B": (1.523, 1.321), "C": (5.321, 1.321)}
+    cfg = make_config(grid_step_m=1.0, weights=SimpleNamespace(length=1.0, bend=0.5))
+    clock = {"now": 0.0}
+    monkeypatch.setattr(table_module.time, "monotonic", lambda: clock["now"])
+    cache = RoutingCache()
+    table = DistanceTable(plan, stops, cfg, cache, deadline=10.0)
+    assert table.get_route("A", "B").status == "success"
+    original = table_module.build_routing_graph
+
+    def expire_in_builder(*args, **kwargs):
+        clock["now"] = 10.0
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(table_module, "build_routing_graph", expire_in_builder)
+    result = table.get_route("A", "C")
+    assert result.status == "timeout" and result.polyline is None
+    assert cache.stats().path_count == 1
+    clock["now"] = 0.0
+    monkeypatch.setattr(table_module, "build_routing_graph", original)
+    recovered = DistanceTable(plan, stops, cfg, cache, deadline=100.0).get_route("A", "C")
+    assert recovered.status == "success"
+    assert recovered == DistanceTable(plan, stops, cfg, RoutingCache(), deadline=100.0).get_route("A", "C")
+
+
+def test_shared_graph_changes_with_geometry_config_and_terminals():
+    from conftest import make_opening
+
+    plan = make_plan(inner=box(0, 0, 10, 10))
+    stops = {"A": (1, 2), "B": (2, 2), "C": (9, 2)}
+    cfg = make_config(grid_step_m=1.0, weights=SimpleNamespace(length=1.0, bend=0.5))
+    cache = RoutingCache()
+    table = DistanceTable(plan, stops, cfg, cache)
+    assert table.get_route("A", "B").status == "success"
+    assert table.get_route("A", "C").status == "success"
+    initial_graphs = cache.stats().graph_count
+    initial_signatures = {key.plan_sig for key in cache._graphs}
+
+    plan.walls_m = box(4, 0, 6, 10)
+    plan.free_space_m = plan.inner_m.difference(plan.walls_m)
+    blocked = table.get_route("A", "C")
+    assert blocked.status == "unreachable_on_grid"
+    assert blocked == DistanceTable(plan, stops, cfg, RoutingCache()).get_route("A", "C")
+    assert any(key.plan_sig not in initial_signatures for key in cache._graphs)
+
+    plan.walls_m = make_plan().walls_m
+    plan.free_space_m = plan.inner_m
+    plan.openings["bad"] = make_opening("bad", ["R1", "missing"], [(5, 4), (5, 6)])
+    unsupported = table.get_route("A", "C")
+    assert unsupported.status == "unsupported_geometry"
+    assert unsupported == DistanceTable(plan, stops, cfg, RoutingCache()).get_route("A", "C")
+    plan.openings.clear()
+    cfg.grid_step_m = 0.5
+    table.stops["C"] = (8.5, 3.5)
+    changed = table.get_route("A", "C")
+    assert changed == DistanceTable(plan, table.stops, cfg, RoutingCache()).get_route("A", "C")
+    assert changed.status == "success"
+    assert cache.stats().graph_count > initial_graphs
+
+
+def test_plan_wide_unsupported_geometry_is_reused_and_content_invalidated(monkeypatch):
+    from othello.routing import table as table_module
+
+    plan = make_plan(inner=box(0, 0, 10, 10), rooms=[
+        make_room("R1", box(0, 0, 6, 10)), make_room("R2", box(5, 0, 10, 10)),
+    ])
+    stops = {"A": (1, 1), "B": (2, 2), "C": (3, 3)}
+    cfg = make_config(weights=SimpleNamespace(length=1.0, bend=0.5))
+    cache = RoutingCache(max_graphs=2)
+    original = table_module.build_routing_graph
+    calls = []
+
+    def counted(*args):
+        calls.append((args[2], args[3]))
+        return original(*args)
+
+    monkeypatch.setattr(table_module, "build_routing_graph", counted)
+    table = DistanceTable(plan, stops, cfg, cache)
+    first = table.get_route("A", "B")
+    assert first.status == "unsupported_geometry" and "Overlapping room interiors" in first.diagnostics[0]
+    assert table.get_route("B", "C") == first
+    assert len(calls) == 1
+    stops["C"] = (3.5, 3.5)
+    table.stops["C"] = stops["C"]
+    assert table.get_route("B", "C").status == "unsupported_geometry"
+    assert len(calls) == 2
+    cfg.grid_step_m = 0.5
+    assert table.get_route("B", "C").status == "unsupported_geometry"
+    assert len(calls) == 3
+    assert cache.stats().graph_count <= cache.max_graphs
+    cache.invalidate(plan.plan_id)
+    assert table.get_route("B", "C").status == "unsupported_geometry"
+    assert len(calls) == 4
+    plan.rooms["R1"].polygon_m = box(0, 0, 5, 10)
+    recovered = table.get_route("A", "B")
+    assert recovered.status == "success"
+    assert recovered == DistanceTable(plan, table.stops, cfg, RoutingCache()).get_route("A", "B")
+    assert len(calls) == 6  # recovered query plus fresh-cache oracle
+
+
+def test_terminal_unsupported_geometry_and_timeout_are_not_shared_failures(monkeypatch):
+    from othello.routing import table as table_module
+    from othello.routing.types import GraphBuildResult
+
+    plan = make_plan(inner=box(0, 0, 10, 10), rooms=[
+        make_room("R1", box(0, 0, 5, 10)), make_room("R2", box(5, 0, 10, 10)),
+    ])
+    cfg = make_config(weights=SimpleNamespace(length=1.0, bend=0.5))
+    calls = []
+    original = table_module.build_routing_graph
+
+    def counted(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(table_module, "build_routing_graph", counted)
+    table = DistanceTable(plan, {"A": (1, 1), "B": (2, 2), "bad": (5, 5)}, cfg, RoutingCache())
+    assert table.get_route("A", "B").status == "unsupported_geometry"
+    assert table.get_route("A", "B").status == "unsupported_geometry"
+    assert len(calls) == 1
+    assert table.get_route("B", "A").status == "unsupported_geometry"
+    assert len(calls) == 2
+
+    def timed_out(*args):
+        calls.append(1)
+        return GraphBuildResult("timeout", diagnostics=("temporary deadline",))
+
+    monkeypatch.setattr(table_module, "build_routing_graph", timed_out)
+    table = DistanceTable(plan, {"A": (1, 1), "B": (2, 2)}, cfg, RoutingCache())
+    assert table.get_route("A", "B").status == "timeout"
+    assert table.get_route("A", "B").status == "timeout"
+    assert len(calls) == 4
+
+
+def test_cached_unsupported_opening_is_invalidated_by_opening_change():
+    opening = make_opening("D", ["R1", "R1"], [(5, 4), (5, 6)])
+    plan = make_plan(inner=box(0, 0, 10, 10), rooms=[
+        make_room("R1", box(0, 0, 5, 10)), make_room("R2", box(5, 0, 10, 10)),
+    ], openings=[opening])
+    cfg = make_config(weights=SimpleNamespace(length=1.0, bend=0.5))
+    table = DistanceTable(plan, {"A": (1, 5), "B": (9, 5)}, cfg, RoutingCache())
+    bad = table.get_route("A", "B")
+    assert bad.status == "unsupported_geometry" and "two interior rooms" in bad.diagnostics[0]
+    opening.rooms = ["R1", "R2"]
+    recovered = table.get_route("A", "B")
+    assert recovered.status == "success" and recovered.opening_ids == ("D",)
 
 
 @pytest.mark.parametrize("case,expected_status", [
@@ -297,6 +586,7 @@ def test_config_changes_isolate_cache():
     stats = cache.stats()
     assert stats.path_misses == 2
     assert stats.path_hits == 0
+    assert stats.graph_hits >= 1  # Weights change A*, not the selected Hanan graph.
 
 
 def test_terminal_set_changes_isolate_graph_cache():
@@ -309,7 +599,7 @@ def test_terminal_set_changes_isolate_graph_cache():
     table_a = DistanceTable(plan, stops_a, cfg, cache)
     r_a = table_a.get_route("H1", "N1")
     assert r_a.status == "success"
-    assert cache.stats().graph_misses == 1
+    assert cache.stats().graph_misses >= 2
 
     # Table B with 3 stops -> different terminal coordinates signature in GraphKey
     stops_b = {"H1": (1, 2), "N1": (9, 2), "N2": (3, 3)}
@@ -317,7 +607,7 @@ def test_terminal_set_changes_isolate_graph_cache():
     r_b = table_b.get_route("H1", "N1")
     assert r_b.status == "success"
     # Produces a new GraphKey because terminals set changed coordinate grid lines
-    assert cache.stats().graph_misses == 2
+    assert len({key.terminals for key in cache._graphs}) == 2
 
 
 def test_cached_vs_uncached_strict_equivalence():
