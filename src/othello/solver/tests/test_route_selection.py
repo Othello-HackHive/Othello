@@ -58,7 +58,7 @@ def _two_ring_case(monkeypatch, *, reverse=False):
         options = {key: tuple(reversed(routes)) for key, routes in options.items()}
     calls = []
 
-    def library(table, source, target, cfg, deadline=None):
+    def library(table, source, target, cfg, deadline=None, **kwargs):
         calls.append((source, target))
         return RouteLibraryResult("ready", options[source, target])
 
@@ -138,6 +138,35 @@ def test_invalid_checker_results_never_become_incumbent(monkeypatch):
     assert result.design is None and result.J is None and not result.verified
 
 
+def test_checker_exception_after_verified_baseline_keeps_incumbent_and_continues(monkeypatch):
+    plan, base, _ = _two_ring_case(monkeypatch)
+    calls = 0
+
+    def flaky(plan, design, cfg):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("checker service failed")
+        return NS(valid=True, metrics=NS(J=float(calls)))
+
+    result = select_whole_design_routes(plan, base, config(), checker=flaky)
+    assert result.status == "verified" and result.verified
+    assert result.design == base and result.J == 1.0
+    assert result.checked_designs == 5 and calls == 5
+    assert any("RuntimeError" in detail and "checker service failed" in detail
+               for detail in result.diagnostics)
+
+
+@pytest.mark.parametrize("malformed", [None, NS(valid="yes", metrics=NS(J=0.0)),
+                                        NS(valid=True, metrics=None), NS(valid=True, metrics=NS(J=float("nan")))])
+def test_malformed_checker_response_never_becomes_verified(monkeypatch, malformed):
+    plan, base, _ = _two_ring_case(monkeypatch)
+    result = select_whole_design_routes(plan, base, config(), checker=lambda *_: malformed)
+    assert result.status == "no_verified_design" and not result.verified
+    assert result.design is None and result.J is None and result.checked_designs == 5
+    assert any("checker failed" in detail for detail in result.diagnostics)
+
+
 @pytest.mark.parametrize("failure", ["timeout", "unsupported_geometry", "unreachable_on_grid"])
 def test_library_failure_keeps_only_checked_F0_and_propagates_status(monkeypatch, failure):
     from othello.solver import route_selection
@@ -171,8 +200,8 @@ def test_selected_variant_keeps_ordered_repeated_opening_ids(monkeypatch):
     plan, base, _ = _two_ring_case(monkeypatch)
     original = route_selection.build_route_library
 
-    def with_metadata(table, source, target, cfg, deadline=None):
-        found = original(table, source, target, cfg, deadline)
+    def with_metadata(table, source, target, cfg, deadline=None, **kwargs):
+        found = original(table, source, target, cfg, deadline, **kwargs)
         if (source, target) == ("H1", "N1"):
             route = replace(found.routes[0], opening_ids=("D2", "D1", "D2"))
             return RouteLibraryResult("ready", (route,))

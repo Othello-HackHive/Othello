@@ -16,6 +16,10 @@ from shapely.ops import nearest_points, polylabel, unary_union
 from .types import Coord, HubCandidate, HubCandidateResult
 
 
+class HubCandidateLimitError(ValueError):
+    """The configured cap cannot retain every mandatory hub representative."""
+
+
 class _TimedOut(Exception):
     pass
 
@@ -78,7 +82,8 @@ def _parts(zone: BaseGeometry) -> tuple[Polygon, ...]:
         return ()
     if isinstance(zone, Polygon):
         return (zone,)
-    return tuple(sorted(zone.geoms, key=lambda p: (p.bounds, p.area)))
+    return tuple(sorted((part for part in zone.geoms if isinstance(part, Polygon) and not part.is_empty),
+                        key=lambda p: (p.bounds, p.area)))
 
 
 def _grid_values(low: float, high: float, step: float) -> Iterator[float]:
@@ -88,13 +93,14 @@ def _grid_values(low: float, high: float, step: float) -> Iterator[float]:
         yield index * step
 
 
-def _validate_config(config: Any, deadline: float | None) -> tuple[float, float, float, int]:
+def _validate_config(config: Any, deadline: float | None) -> tuple[float, float, float, int, float]:
     _check_deadline(deadline)
     try:
         step = float(config.hub_grid_step_m)
         clearance = float(config.hub_wall_clearance_m)
         tolerance = float(config.tolerance_m)
         cap = config.limits.hub_candidates
+        min_node_distance = float(getattr(config, "min_hub_node_distance_m", 0.0))
     except (AttributeError, TypeError, ValueError) as exc:
         raise ValueError("config needs hub_grid_step_m, hub_wall_clearance_m, tolerance_m and limits.hub_candidates") from exc
     if not math.isfinite(step) or step <= 0:
@@ -105,8 +111,10 @@ def _validate_config(config: Any, deadline: float | None) -> tuple[float, float,
         raise ValueError("tolerance_m must be finite and positive")
     if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
         raise ValueError("limits.hub_candidates must be a positive integer")
+    if not math.isfinite(min_node_distance) or min_node_distance < 0:
+        raise ValueError("min_hub_node_distance_m must be finite and nonnegative")
     _check_deadline(deadline)
-    return step, clearance, tolerance, cap
+    return step, clearance, tolerance, cap, min_node_distance
 
 
 def _opening_gap(opening: Any, opening_id: str) -> LineString:
@@ -210,7 +218,7 @@ def generate_hub_candidates(
 ) -> HubCandidateResult:
     """Generate feasible, diverse candidates; never change Part 1 geometry."""
     try:
-        step, clearance, tolerance, cap = _validate_config(config, deadline)
+        step, clearance, tolerance, cap, min_node_distance = _validate_config(config, deadline)
         _check_deadline(deadline)
         try:
             room_ids = tuple(sorted(territory.room_ids))
@@ -243,8 +251,13 @@ def generate_hub_candidates(
                 raise _Unsupported(f"room {room_id} is not an assigned eligible interior room")
             polygon = all_room_polygons[room_id]
             zone = _geometry(zones[room_id], f"hub zone {room_id}", polygonal=True)
+            # Exact `covers` can disagree with an empty difference after GEOS
+            # overlay on clipped ResPlan boundaries (plan 16101). The latter
+            # directly tests whether any zone geometry lies outside its owner.
             if polygon.is_empty or (not zone.is_empty and (
-                not polygon.covers(zone) or not inner.covers(zone) or not free.covers(zone)
+                not zone.difference(polygon).is_empty or
+                not zone.difference(inner).is_empty or
+                not zone.difference(free).is_empty
             )):
                 raise _Unsupported(f"hub zone {room_id} extends outside its room or free interior")
             room_polygons[room_id], room_zones[room_id] = polygon, zone
@@ -298,22 +311,28 @@ def generate_hub_candidates(
         raw: list[_Sample] = []
         deepest: dict[str, list[tuple[Polygon, Coord]]] = {}
 
-        def add(room_id: str, point: Coord, tag: str) -> None:
+        def add(room_id: str, point: Coord, tag: str) -> bool:
             _check_deadline(deadline)
             x, y = point
             if not math.isfinite(x) or not math.isfinite(y):
-                return
+                return False
+            if min_node_distance and any(
+                math.hypot(x - nx, y - ny) + _roundoff(x, y, nx, ny) < min_node_distance
+                for nx, ny in ordered_nodes
+            ):
+                return False
             p = Point(point)
             zone = room_zones[room_id]
             if not room_polygons[room_id].contains(p) or not zone.covers(p):
-                return
+                return False
             if not inner.covers(p) or not free.covers(p):
-                return
+                return False
             if not walls.is_empty:
                 distance = p.distance(walls)
                 if distance + _roundoff(distance, clearance, x, y) < clearance:
-                    return
+                    return False
             raw.append(_Sample(room_id, point, {tag}))
+            return True
 
         for room_id in room_ids:
             _check_deadline(deadline)
@@ -341,6 +360,14 @@ def generate_hub_candidates(
             for nx, _ in ordered_nodes:
                 for _, ny in ordered_nodes:
                     add(room_id, (nx, ny), "node_aligned")
+            if min_node_distance:
+                offset = min_node_distance + tolerance
+                diagonal = offset / math.sqrt(2)
+                for nx, ny in ordered_nodes:
+                    for dx, dy in ((offset, 0), (-offset, 0), (0, offset), (0, -offset),
+                                   (diagonal, diagonal), (diagonal, -diagonal),
+                                   (-diagonal, diagonal), (-diagonal, -diagonal)):
+                        add(room_id, (nx + dx, ny + dy), "node_aligned")
 
         for door in doors:
             _check_deadline(deadline)
@@ -357,21 +384,63 @@ def generate_hub_candidates(
                         add(door.room_id, (near.x + fraction * dx, near.y + fraction * dy), "near_door")
 
         samples = _deduplicate(raw, tolerance, deadline)
-        if not samples:
-            _check_deadline(deadline)
-            return HubCandidateResult("no_candidates", diagnostics=("No valid points in assigned hub zones",))
-        candidates: list[HubCandidate] = []
-        for sample in samples:
+        def candidate_from(sample: _Sample) -> HubCandidate:
             _check_deadline(deadline)
             point = Point(sample.point_m)
             nearby = tuple(sorted(door.opening_id for door in doors if door.room_id == sample.room_id and
                                   point.distance(door.gap) <= door.threshold_m +
                                   _roundoff(*sample.point_m, door.threshold_m)))
-            candidates.append(HubCandidate(
+            return HubCandidate(
                 sample.point_m, sample.room_id,
                 tuple(sorted(sample.tags, key=lambda tag: _TAG_ORDER[tag])), nearby,
                 _attachment_proxy(sample.point_m, ordered_nodes),
-            ))
+            )
+
+        candidates = [candidate_from(sample) for sample in samples]
+        # A nearest zone point may lie on a room boundary, while a narrow
+        # positive-area portion of the same near-door region is feasible.
+        # Recover a witness only for groups missed by the ordinary samples.
+        # Keep a near-coincident witness if deduplication would otherwise
+        # discard the only point that actually covers this doorway group.
+        for door in doors:
+            _check_deadline(deadline)
+            if any(candidate.room_id == door.room_id and door.opening_id in candidate.nearby_opening_ids
+                   for candidate in candidates):
+                continue
+            region = room_zones[door.room_id].intersection(door.gap.buffer(door.threshold_m))
+            _check_deadline(deadline)
+            if not walls.is_empty:
+                # This only narrows witness search. The exact wall-distance
+                # predicate in add() remains the final authority.
+                region = region.difference(walls.buffer(clearance))
+                _check_deadline(deadline)
+            for component in _parts(region):
+                _check_deadline(deadline)
+                if component.area <= 0:
+                    continue
+                def witness_points() -> Iterator[Point]:
+                    yield component.representative_point()
+                    _check_deadline(deadline)
+                    yield polylabel(component, tolerance=min(step / 64, 0.0001))
+
+                for point in witness_points():
+                    _check_deadline(deadline)
+                    exact = (point.x, point.y)
+                    if not add(door.room_id, exact, "near_door"):
+                        continue
+                    witness = candidate_from(raw[-1])
+                    if any(existing.room_id == witness.room_id and existing.point_m == witness.point_m
+                           for existing in candidates):
+                        break
+                    candidates.append(witness)
+                    if door.opening_id in witness.nearby_opening_ids:
+                        break
+                if any(candidate.room_id == door.room_id and door.opening_id in candidate.nearby_opening_ids
+                       for candidate in candidates):
+                    break
+        if not candidates:
+            _check_deadline(deadline)
+            return HubCandidateResult("no_candidates", diagnostics=("No valid points in assigned hub zones",))
 
         mandatory: set[int] = set()
         for room_id in room_ids:
@@ -395,7 +464,7 @@ def generate_hub_candidates(
             mandatory.update(own[index] for index in solution)
         _check_deadline(deadline)
         if len(mandatory) > cap:
-            raise ValueError(f"limits.hub_candidates={cap} is below the {len(mandatory)} distinct required representatives")
+            raise HubCandidateLimitError(f"limits.hub_candidates={cap} is below the {len(mandatory)} distinct required representatives")
 
         selected = set(mandatory)
         for tag in ("deepest", "node_aligned"):

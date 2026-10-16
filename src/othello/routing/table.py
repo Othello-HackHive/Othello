@@ -1,7 +1,8 @@
 """Task 3.3: Lazy obstacle-aware distance table with explicit cache dependency injection."""
 
+from collections import deque
 from collections.abc import Mapping
-from numbers import Real
+from dataclasses import replace
 import time
 from typing import Any
 
@@ -26,6 +27,26 @@ def _copy_table_result(res: TableRouteResult) -> TableRouteResult:
         last_direction=res.last_direction,
         diagnostics=res.diagnostics,
     )
+
+
+def _shared_reaches(graph: ValidatedGraph, start: Coord, goal: Coord,
+                    deadline: float | None) -> bool:
+    """Check a shared Hanan graph before treating it as this leg's graph."""
+    _check_deadline(deadline, "shared graph connectivity")
+    if start not in graph.vertices or goal not in graph.vertices:
+        return False
+    queue = deque([start])
+    seen = {start}
+    while queue:
+        _check_deadline(deadline, "shared graph connectivity")
+        for arc in graph.adjacency[queue.popleft()]:
+            _check_deadline(deadline, "shared graph connectivity")
+            if arc.target == goal:
+                return True
+            if arc.target not in seen:
+                seen.add(arc.target)
+                queue.append(arc.target)
+    return False
 
 
 class DistanceTable:
@@ -93,6 +114,73 @@ class DistanceTable:
             bend_weight=float(self.config.weights.bend),
         )
 
+    def _build_leg_graph(self, graph_key: GraphKey, from_id: str, to_id: str
+                         ) -> tuple[ValidatedGraph | None, str | None, tuple[str, ...]]:
+        """Run the unchanged pair-specific policy/fallback sequence."""
+        def save_stage(mode: str, fallback: bool, graph: Any, seconds: float) -> None:
+            self.cache.record_graph_build(seconds)
+            if self.deadline is not None and time.monotonic() >= self.deadline:
+                return
+            stage_key = replace(graph_key, leg=None, stage=(mode, fallback))
+            self.cache.put_graph(stage_key, validate_graph(graph))
+
+        built = build_routing_graph(self.plan, self.stops, from_id, to_id,
+                                    self.config, self.deadline, save_stage)
+        if built.status != "ready":
+            if built.status == "unsupported_geometry" and built.diagnostics:
+                failure_key = replace(graph_key, leg=None) if built.cacheable_unsupported else graph_key
+                self.cache.put_unsupported_geometry(failure_key, built.diagnostics)
+            return None, built.status, built.diagnostics
+        graph = validate_graph(built.graph, self.deadline)
+        shareable_mode = ("allow" if self.config.cable_transit_policy == "allow"
+                          else "permitted_only")
+        if (self.stops[from_id] != self.stops[to_id]
+                and getattr(built, "fallback_used", None) is False
+                and getattr(built, "transit_mode", None) == shareable_mode):
+            self.cache.put_graph(replace(graph_key, leg=None), graph)
+        else:
+            self.cache.put_graph(graph_key, graph)
+        return graph, None, ()
+
+    def _select_leg_graph(self, graph_key: GraphKey, from_id: str, to_id: str
+                          ) -> tuple[ValidatedGraph | None, str | None, tuple[str, ...], bool]:
+        """Prefer a pair graph, then a compatible shared Hanan graph."""
+        unsupported = self.cache.get_unsupported_geometry(graph_key, self.deadline)
+        if unsupported is None:
+            unsupported = self.cache.get_unsupported_geometry(replace(graph_key, leg=None), self.deadline)
+        if unsupported is not None:
+            return None, "unsupported_geometry", unsupported, False
+        graph = self.cache.get_graph(graph_key, self.deadline)
+        if graph is not None:
+            return graph, None, (), False
+        start, goal = self.stops[from_id], self.stops[to_id]
+        # A* accepts an isolated vertex as a zero-length route. A fresh build
+        # must validate coincident terminals against walls, free space, and policy.
+        if start != goal:
+            modes = {"forbid": ("permitted_only",), "allow": ("allow",),
+                     "avoid_if_possible": ("permitted_only", "allow")}[self.config.cable_transit_policy]
+            complete = True
+            for mode in modes:
+                for fallback in (False, True):
+                    stage_key = replace(graph_key, leg=None, stage=(mode, fallback))
+                    staged = self.cache.get_graph(stage_key, self.deadline)
+                    if staged is None:
+                        complete = False
+                        break
+                    if _shared_reaches(staged, start, goal, self.deadline):
+                        return staged, None, (), True
+                if not complete:
+                    break
+            if complete:
+                return None, "unreachable_on_grid", (
+                    "Requested terminals are disconnected on the completed search grids; "
+                    "geometric infeasibility is not proven.",), False
+            shared = self.cache.get_graph(replace(graph_key, leg=None), self.deadline)
+            if shared is not None and _shared_reaches(shared, start, goal, self.deadline):
+                return shared, None, (), True
+        graph, status, diagnostics = self._build_leg_graph(graph_key, from_id, to_id)
+        return graph, status, diagnostics, False
+
     def get_route(
         self, from_id: str, to_id: str, initial_direction: Direction | None = None
     ) -> TableRouteResult:
@@ -129,35 +217,43 @@ class DistanceTable:
                 self._routes[path_key] = table_res
                 return _copy_table_result(table_res)
 
-            # Route miss: check graph cache
+            # Route miss: reuse only a graph that a fresh build would select.
             graph_key = path_key.graph_key
-            val_graph = self.cache.get_graph(graph_key, self.deadline)
-            if val_graph is None:
-                built = build_routing_graph(
-                    self.plan, self.stops, from_id, to_id, self.config, self.deadline
-                )
-                if built.status != "ready":
-                    diag = built.diagnostics
-                    if built.status == "unreachable_on_grid":
+            val_graph, graph_status, diag, shared = self._select_leg_graph(
+                graph_key, from_id, to_id)
+            if graph_status is not None:
+                if graph_status == "unreachable_on_grid":
+                    res = TableRouteResult("unreachable_on_grid", diagnostics=diag)
+                    self.cache.put_route(
+                        path_key, RouteSearchResult("unreachable_on_grid", diagnostics=diag)
+                    )
+                    self._routes[path_key] = res
+                    return _copy_table_result(res)
+                return TableRouteResult(graph_status, diagnostics=diag)
+            assert val_graph is not None
+
+            # Run direction-aware A* on the validated graph
+            search_res = astar_route(
+                val_graph, start, goal, self.config, self.deadline, initial_direction
+            )
+            if shared and search_res.status == "unreachable":
+                # Do not turn a shared-graph miss into a negative path result.
+                # The full builder may connect this pair on fallback lines.
+                val_graph, graph_status, diag = self._build_leg_graph(
+                    graph_key, from_id, to_id)
+                if graph_status is not None:
+                    if graph_status == "unreachable_on_grid":
                         res = TableRouteResult("unreachable_on_grid", diagnostics=diag)
                         self.cache.put_route(
                             path_key, RouteSearchResult("unreachable_on_grid", diagnostics=diag)
                         )
                         self._routes[path_key] = res
                         return _copy_table_result(res)
-                    if built.status == "unsupported_geometry":
-                        return TableRouteResult("unsupported_geometry", diagnostics=diag)
-                    if built.status == "timeout":
-                        return TableRouteResult("timeout", diagnostics=diag)
-                    return TableRouteResult(built.status, diagnostics=diag)
-
-                val_graph = validate_graph(built.graph, self.deadline)
-                self.cache.put_graph(graph_key, val_graph)
-
-            # Run direction-aware A* on the validated graph
-            search_res = astar_route(
-                val_graph, start, goal, self.config, self.deadline, initial_direction
-            )
+                    return TableRouteResult(graph_status, diagnostics=diag)
+                assert val_graph is not None
+                search_res = astar_route(
+                    val_graph, start, goal, self.config, self.deadline, initial_direction
+                )
             if search_res.status == "timeout":
                 return TableRouteResult("timeout", diagnostics=search_res.diagnostics)
 

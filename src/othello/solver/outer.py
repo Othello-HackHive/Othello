@@ -10,10 +10,11 @@ from typing import Any, Callable
 
 from othello.routing import DistanceTable, RoutingCache
 
-from .f0 import construct_f0_design
-from .hub_candidates import generate_hub_candidates
+from .f0 import construct_f0_design, construct_quick_f0_design
+from .hub_candidates import HubCandidateLimitError, generate_hub_candidates
 from .node_orders import enumerate_visiting_orders
-from .route_selection import _optional_checker, _score_of_verified, select_whole_design_routes
+from .route_selection import _invoke_checker, _optional_checker, _score_of_verified, select_whole_design_routes
+from .candidate_tables import candidate_tables
 from .types import HubCountSummary, OuterSearchResult
 
 
@@ -22,6 +23,10 @@ class _Deadline(Exception):
 
 
 class _Unsupported(Exception):
+    pass
+
+
+class _CandidateConfiguration(Exception):
     pass
 
 
@@ -63,7 +68,11 @@ def _batch(value: Any, count: int) -> tuple[tuple[Any, ...], str]:
 
 def _ring_variants(plan: Any, territory: Any, hub_id: str, config: Any,
                    cache: RoutingCache, deadline: float | None, cap: int) -> list[tuple[float, dict]]:
-    candidates = generate_hub_candidates(plan, territory, config, deadline)
+    try:
+        candidates = generate_hub_candidates(plan, territory, config, deadline)
+    except HubCandidateLimitError as exc:
+        _check(deadline)
+        raise _CandidateConfiguration(str(exc)) from exc
     if candidates.status == "timeout":
         raise _Deadline
     if candidates.status == "unsupported_geometry":
@@ -71,11 +80,10 @@ def _ring_variants(plan: Any, territory: Any, hub_id: str, config: Any,
     if candidates.status == "no_candidates":
         return []
     found: list[tuple[float, dict]] = []
-    for candidate in candidates.candidates:
+    for candidate, table in candidate_tables(plan, hub_id, territory.node_ids,
+                                             candidates.candidates, config, cache, deadline):
         _check(deadline)
-        stops = {hub_id: candidate.point_m}
-        stops.update({node_id: plan.nodes[node_id].point_m for node_id in territory.node_ids})
-        table = DistanceTable(plan, stops, config, cache, deadline)
+        stops = table.stops
         orders = enumerate_visiting_orders(hub_id, territory.node_ids, table, config, deadline)
         if orders.status == "timeout":
             raise _Deadline
@@ -191,11 +199,15 @@ def optimize_partitions(
         partition_cap = config.limits.partitions_per_H
         configuration_cap = config.limits.beam_width
         budget = float(config.time_budget_s)
+        reserve_fraction = float(getattr(config, "final_check_reserve_fraction", 0.0))
     except (AttributeError, TypeError, ValueError) as exc:
         raise ValueError("config needs limits.partitions_per_H, limits.beam_width and time_budget_s") from exc
     if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0
            for value in (partition_cap, configuration_cap)) or not math.isfinite(budget) or budget <= 0:
         raise ValueError("outer search limits and time_budget_s must be positive")
+    if (isinstance(getattr(config, "final_check_reserve_fraction", 0.0), bool)
+            or not math.isfinite(reserve_fraction) or not 0 <= reserve_fraction < 1):
+        raise ValueError("final_check_reserve_fraction must be in [0, 1)")
     counts = sorted(partition_batches)
     if any(isinstance(count, bool) or not isinstance(count, int) or count <= 0 for count in counts):
         raise ValueError("hub-count keys must be positive integers")
@@ -211,7 +223,7 @@ def optimize_partitions(
         raise ValueError("lower_bound_hubs must be a positive integer")
     if counts[0] < lower_bound_hubs:
         raise ValueError("partition batches cannot start below the supplied hub lower bound")
-    budget_deadline = time.monotonic() + budget
+    budget_deadline = time.monotonic() + budget * (1 - reserve_fraction)
     effective_deadline = min(deadline, budget_deadline) if deadline is not None else budget_deadline
     route_cache = cache if cache is not None else RoutingCache()
     checker = checker if checker is not None else _optional_checker()
@@ -223,6 +235,7 @@ def optimize_partitions(
     partitions_seen = 0
     configs_seen = 0
     timed_out = False
+    candidate_configuration_error = False
 
     def accept(design: dict[str, Any], score: float, hub_count: int, gap: float) -> None:
         nonlocal incumbent, best_key
@@ -250,77 +263,152 @@ def optimize_partitions(
             diagnostics.append(f"H={count}: Part 1 grouping timed out; lower count remains unresolved")
         if len(options) > partition_cap:
             diagnostics.append(f"H={count}: only {partition_cap} of {len(options)} supplied partitions were explored")
-        for option in options[:partition_cap]:
+        selected_options = options[:partition_cap]
+        quick_signatures: dict[int, tuple | None] = {}
+        # Establish possible incumbents across all partitions before any one
+        # partition spends the rest of the budget on deep route selection.
+        for index, option in enumerate(selected_options):
             try:
                 _check(effective_deadline)
                 partitions_seen += 1
-                baseline = construct_f0_design(plan, option, config, route_cache, effective_deadline)
-                if baseline.status == "timeout":
-                    raise _Deadline
-                if baseline.status != "constructed_unverified" or baseline.design is None:
-                    diagnostics.append(f"H={count}: F0 {baseline.status}: {'; '.join(baseline.diagnostics)}")
-                    continue
-                if provisional is None:
-                    provisional = deepcopy(baseline.design)
                 gap = float(option.area_gap_m2)
-                if checker is not None:
-                    validation = checker(plan, baseline.design, config)
-                    score = _score_of_verified(validation)
-                    if score is not None:
-                        accept(baseline.design, score, count, gap)
-                _check(effective_deadline)
-                selected = select_whole_design_routes(plan, baseline.design, config, checker, route_cache,
-                                                      effective_deadline)
-                configs_seen += 1
-                if selected.verified and selected.design is not None and selected.J is not None:
-                    accept(selected.design, selected.J, count, gap)
-                elif selected.status == "unverified" and selected.design is not None and provisional is None:
-                    provisional = deepcopy(selected.design)
-                if selected.status == "timeout":
+                quick = construct_quick_f0_design(plan, option, config, route_cache, effective_deadline)
+                if quick.status == "timeout":
                     raise _Deadline
-                if selected.status not in {"verified", "unverified", "no_verified_design"}:
-                    diagnostics.append(f"H={count}: route selection {selected.status}: {'; '.join(selected.diagnostics)}")
-                # With no checker, further configurations cannot yield an
-                # authoritative incumbent; retain one provisional design.
-                if checker is None:
-                    continue
-                baseline_signature = _design_key(baseline.design)
-                for alternative in _configuration_designs(plan, option, config, route_cache,
-                                                          effective_deadline, configuration_cap):
+                quick_signature = None
+                if quick.status == "constructed_unverified" and quick.design is not None:
+                    quick_signature = _design_key(quick.design)
+                    if provisional is None:
+                        provisional = deepcopy(quick.design)
+                    if checker is not None:
+                        _, score, failure = _invoke_checker(checker, plan, quick.design, config)
+                        if failure is not None:
+                            diagnostics.append(f"H={count}: quick F0 {failure}")
+                        if score is not None:
+                            accept(quick.design, score, count, gap)
                     _check(effective_deadline)
-                    if _design_key(alternative) == baseline_signature:
-                        continue
-                    configs_seen += 1
-                    validation = checker(plan, alternative, config)
-                    score = _score_of_verified(validation)
-                    if score is not None:
-                        accept(alternative, score, count, gap)
-                    _check(effective_deadline)
-                    selected = select_whole_design_routes(plan, alternative, config, checker,
-                                                          route_cache, effective_deadline)
-                    if selected.verified and selected.design is not None and selected.J is not None:
-                        accept(selected.design, selected.J, count, gap)
-                    if selected.status == "timeout":
-                        raise _Deadline
-            except _Unsupported as exc:
-                diagnostics.append(f"H={count}: unsupported_geometry: {exc}")
+                else:
+                    diagnostics.append(f"H={count}: quick F0 {quick.status}: {'; '.join(quick.diagnostics)}")
+                    candidate_configuration_error |= quick.status == "candidate_configuration_error"
+                quick_signatures[index] = quick_signature
             except _Deadline:
                 timed_out = True
-                diagnostics.append(f"H={count}: deadline expired; no infeasibility proof")
+                diagnostics.append(f"H={count}: quick F0 deadline expired; incumbent retained")
                 break
+        if not timed_out:
+            for index, option in enumerate(selected_options):
+                try:
+                    _check(effective_deadline)
+                    gap = float(option.area_gap_m2)
+                    quick_signature = quick_signatures[index]
+                    baseline = construct_f0_design(plan, option, config, route_cache, effective_deadline)
+                    if baseline.status == "timeout":
+                        raise _Deadline
+                    if baseline.status != "constructed_unverified" or baseline.design is None:
+                        diagnostics.append(f"H={count}: F0 {baseline.status}: {'; '.join(baseline.diagnostics)}")
+                        candidate_configuration_error |= baseline.status == "candidate_configuration_error"
+                        continue
+                    if provisional is None:
+                        provisional = deepcopy(baseline.design)
+                    if checker is not None and _design_key(baseline.design) != quick_signature:
+                        _, score, failure = _invoke_checker(checker, plan, baseline.design, config)
+                        if failure is not None:
+                            diagnostics.append(f"H={count}: F0 {failure}")
+                        if score is not None:
+                            accept(baseline.design, score, count, gap)
+                    _check(effective_deadline)
+                    selected = select_whole_design_routes(plan, baseline.design, config, checker, route_cache,
+                                                          effective_deadline)
+                    configs_seen += 1
+                    if selected.verified and selected.design is not None and selected.J is not None:
+                        accept(selected.design, selected.J, count, gap)
+                    elif selected.status == "unverified" and selected.design is not None and provisional is None:
+                        provisional = deepcopy(selected.design)
+                    if selected.status == "timeout":
+                        raise _Deadline
+                    if selected.status not in {"verified", "unverified", "no_verified_design"}:
+                        diagnostics.append(f"H={count}: route selection {selected.status}: {'; '.join(selected.diagnostics)}")
+                    elif any("checker" in detail.lower() for detail in selected.diagnostics):
+                        diagnostics.extend(f"H={count}: route selection: {detail}" for detail in selected.diagnostics
+                                           if "checker" in detail.lower())
+                    # With no checker, further configurations cannot yield an
+                    # authoritative incumbent; retain one provisional design.
+                    if checker is None:
+                        continue
+                    baseline_signature = _design_key(baseline.design)
+                    for alternative in _configuration_designs(plan, option, config, route_cache,
+                                                              effective_deadline, configuration_cap):
+                        _check(effective_deadline)
+                        if _design_key(alternative) == baseline_signature:
+                            continue
+                        configs_seen += 1
+                        _, score, failure = _invoke_checker(checker, plan, alternative, config)
+                        if failure is not None:
+                            diagnostics.append(f"H={count}: alternative {failure}")
+                        if score is not None:
+                            accept(alternative, score, count, gap)
+                        _check(effective_deadline)
+                        selected = select_whole_design_routes(plan, alternative, config, checker,
+                                                              route_cache, effective_deadline)
+                        if selected.verified and selected.design is not None and selected.J is not None:
+                            accept(selected.design, selected.J, count, gap)
+                        if selected.status == "timeout":
+                            raise _Deadline
+                        if selected.diagnostics:
+                            diagnostics.extend(f"H={count}: route selection: {detail}" for detail in selected.diagnostics
+                                               if "checker" in detail.lower())
+                except _Unsupported as exc:
+                    diagnostics.append(f"H={count}: unsupported_geometry: {exc}")
+                except _CandidateConfiguration as exc:
+                    candidate_configuration_error = True
+                    diagnostics.append(f"H={count}: candidate_configuration_error: {exc}")
+                except _Deadline:
+                    timed_out = True
+                    diagnostics.append(f"H={count}: deadline expired; no infeasibility proof")
+                    break
         if incumbent is not None and best_key is not None and best_key[0] == count:
             tried[count] = "feasible"
             try:
-                _check(effective_deadline)
-                improved = _improve_incumbent(plan, incumbent, config, checker,
-                                              route_cache, effective_deadline)
-                if improved.verified and improved.design is not None and improved.J is not None:
-                    accept(improved.design, improved.J, count, best_key[2])
-                if improved.status == "timeout":
-                    timed_out = True
-                elif improved.status == "unsupported_geometry":
-                    diagnostics.append(f"H={count}: improvement unsupported_geometry: "
-                                       f"{'; '.join(improved.diagnostics)}")
+                seen_seeds: set[tuple] = set()
+                checked_improvements: dict[tuple, Any] = {}
+
+                def memoized_checker(check_plan: Any, candidate: dict, check_config: Any) -> Any:
+                    signature = _design_key(candidate)
+                    if signature in checked_improvements:
+                        return checked_improvements[signature]
+                    assert checker is not None
+                    result = checker(check_plan, candidate, check_config)
+                    # A complete, well-formed rejection is as reusable as a
+                    # verified result. Exceptions and malformed responses are
+                    # left uncached so the next sweep may recover.
+                    valid = getattr(result, "valid", None)
+                    if isinstance(valid, bool) and (not valid or _score_of_verified(result) is not None):
+                        checked_improvements[signature] = result
+                    return result
+
+                while incumbent is not None and best_key is not None:
+                    _check(effective_deadline)
+                    seed = _design_key(incumbent)
+                    if seed in seen_seeds:
+                        break
+                    seen_seeds.add(seed)
+                    prior_key = best_key
+                    improved = _improve_incumbent(plan, incumbent, config, memoized_checker,
+                                                  route_cache, effective_deadline)
+                    if improved.verified and improved.design is not None and improved.J is not None:
+                        accept(improved.design, improved.J, count, prior_key[2])
+                    if improved.status == "timeout":
+                        timed_out = True
+                        break
+                    if improved.status == "unsupported_geometry":
+                        diagnostics.append(f"H={count}: improvement unsupported_geometry: "
+                                           f"{'; '.join(improved.diagnostics)}")
+                        break
+                    if improved.diagnostics:
+                        diagnostics.extend(f"H={count}: improvement: {detail}" for detail in improved.diagnostics
+                                           if "checker" in detail.lower() or "candidate" in detail.lower())
+                    if best_key is None or best_key >= prior_key:
+                        break
             except _Deadline:
                 timed_out = True
             if timed_out:
@@ -337,7 +425,11 @@ def optimize_partitions(
         proven = False
     summary = HubCountSummary(lower_bound_hubs, tried, proven)
     status = "timeout" if timed_out else "verified" if incumbent is not None else \
-             "unverified" if provisional is not None else "no_design_found"
+             "unverified" if provisional is not None else \
+             "candidate_configuration_error" if candidate_configuration_error else "no_design_found"
+    if timed_out:
+        diagnostics.append("Search timed out with a checker-verified incumbent retained" if incumbent is not None
+                           else "Search timed out without a checker-verified design")
     if checker is None:
         diagnostics.append("Part 2 check_design is unavailable; provisional designs are never incumbents")
     return OuterSearchResult(status, incumbent, provisional, incumbent is not None, best_j,

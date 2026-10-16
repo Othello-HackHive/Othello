@@ -19,6 +19,7 @@ import argparse
 import copy
 import difflib
 import json
+import math
 import os
 import tomllib
 from collections.abc import Mapping, Sequence
@@ -132,6 +133,7 @@ def check_config_values(cfg: SolverConfig) -> list[str]:
     need(cfg.cable_transit_policy in TRANSIT_POLICIES, f"cable_transit_policy must be one of {TRANSIT_POLICIES}")
     need(cfg.tiebreak_gap_definition in TIEBREAK_DEFINITIONS, f"tiebreak_gap_definition must be one of {TIEBREAK_DEFINITIONS}")
     need(cfg.max_nodes_per_hub >= 1, "max_nodes_per_hub must be at least 1")
+    need(cfg.max_nodes_per_hub <= 5, "max_nodes_per_hub cannot exceed the official limit of 5")
     need(cfg.max_area_per_hub_m2 > 0, "max_area_per_hub_m2 must be above 0")
     need(cfg.hub_wall_clearance_m >= 0, "hub_wall_clearance_m cannot be negative")
     need(cfg.tolerance_m > 0, "tolerance_m must be above 0")
@@ -139,6 +141,8 @@ def check_config_values(cfg: SolverConfig) -> list[str]:
     need(cfg.time_budget_s > 0, "time_budget_s must be above 0")
     need(0 <= cfg.final_check_reserve_fraction < 1, "final_check_reserve_fraction must be at least 0 and below 1")
     need(cfg.hub_grid_step_m > 0, "hub_grid_step_m must be above 0")
+    need(math.isfinite(cfg.min_hub_node_distance_m) and cfg.min_hub_node_distance_m >= 0,
+         "min_hub_node_distance_m must be finite and nonnegative")
     need(cfg.grid_step_m > 0, "grid_step_m must be above 0")
     need(0 <= cfg.output_precision_decimals <= 12, "output_precision_decimals must be between 0 and 12")
     offset = cfg.parallel_lane_offset_m

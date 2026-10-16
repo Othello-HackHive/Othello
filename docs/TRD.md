@@ -57,8 +57,8 @@ m^2      = units^2 / scale^2
 
 | Mode | Behaviour |
 |---|---|
-| `forbid` | Never traverse excluded interior rooms |
-| `avoid_if_possible` (**default**, A1) | Use an excluded interior room only if no other route exists for that leg |
+| `forbid` (**default until P3 is answered**) | Never traverse excluded interior rooms |
+| `avoid_if_possible` (A1) | Use an excluded interior room only if no other route exists for that leg |
 | `allow` | Treat all interior free space normally; compare routes by J |
 
   Switching to `allow` after the organisers answer is a one-line config change.
@@ -206,6 +206,7 @@ return incumbent or a structured failure
 | `limits.exact_combo_limit` | 20000 | Evaluate all combinations below this |
 | `grid.step_m` | 0.10 | Fallback grid step |
 | `hub_grid_step_m` | 0.25 | Hub candidate grid step |
+| `min_hub_node_distance_m` | 0.002 | Interim separation from assigned fixed nodes; 0 permits coincidence |
 
 ## 7. Metric maths (official J)
 

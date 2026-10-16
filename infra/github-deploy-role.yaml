@@ -11,6 +11,16 @@ Parameters:
   GitHubRepo:
     Type: String
     Default: Othello
+  GitHubOrgId:
+    Type: String
+    Default: "343091625"
+    Description: >
+      GitHub's permanent number for the organization (it cannot be re-used by someone else after a rename).
+      GitHub puts it in the identity it presents: repo:ORG@ORGID/REPO@REPOID.
+  GitHubRepoId:
+    Type: String
+    Default: "1420966048"
+    Description: GitHub's permanent number for the repository.
   Branch:
     Type: String
     Default: main
@@ -52,7 +62,10 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/${Branch}"
+                # Either way GitHub writes the identity of a run on the main branch of this one repository.
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubOrg}@${GitHubOrgId}/${GitHubRepo}@${GitHubRepoId}:ref:refs/heads/${Branch}"
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/${Branch}"
       Policies:
         - PolicyName: deploy-othello-stack
           PolicyDocument:

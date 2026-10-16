@@ -113,6 +113,16 @@ def test_holes_and_concave_inner_never_cross_outside(shape, config, assert_edges
     assert_edges_safe(result, plan, config)
 
 
+def test_same_room_fast_path_does_not_shortcut_across_concave_void(config, assert_edges_safe):
+    inner = Polygon([(0, 0), (2, 0), (2, 4), (4, 4), (4, 0), (6, 0), (6, 6), (0, 6)])
+    plan = make_plan(inner=inner)
+    start, goal = (1, 1), (5, 1)
+    result = build(plan, config, {"H1": start, "N1": goal})
+    assert result.status == "ready"
+    assert not result.graph.has_edge(start, goal)
+    assert_edges_safe(result, plan, config)
+
+
 def test_fallback_restores_connectivity_and_keeps_exact_lines(assert_edges_safe):
     inner = Polygon([(0, 0), (2, 0), (2, 4), (4, 4), (4, 0), (6, 0), (6, 6), (0, 6)])
     plan = make_plan(inner=inner)
