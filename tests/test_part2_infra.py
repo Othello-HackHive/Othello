@@ -514,3 +514,21 @@ def test_the_guide_puts_the_deploy_from_your_own_computer_first_and_explains_the
         "One-time setup for Way 2"
     )
     assert "`AUTO_DEPLOY`" in text and "AllowedOrigins=" in text
+
+
+def test_the_deploy_role_may_push_to_the_dash_less_image_repositories_sam_creates():
+    """SAM names them othellocablering<hash>/<function>repo: seen in the real deploy output."""
+    role = load("github-deploy-role.yaml")
+    statements = role["Resources"]["DeployRole"]["Properties"]["Policies"][0][
+        "PolicyDocument"
+    ]["Statement"]
+    images = next(s for s in statements if s["Sid"] == "ImageRepositories")
+    assert images["Action"] == "ecr:*"
+    text = str(images["Resource"])
+    assert (
+        "Compact" in text and "Fn::Split" in text and "repository/${Compact}*" in text
+    )
+    assert "repository/${StackName}*" in text and "aws-sam-cli-managed-default" in text
+    assert "repository/*" not in text.replace(
+        "repository/${", ""
+    )  # never every repository in the account

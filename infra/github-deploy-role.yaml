@@ -109,6 +109,11 @@ Resources:
                 Effect: Allow
                 Action: ecr:*
                 Resource:
+                  # SAM names the image repositories after the stack with the dashes removed
+                  # (othellocablering3a2bbe03/apifunction...), so both spellings are allowed.
+                  - !Sub
+                    - "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${Compact}*"
+                    - Compact: !Join ["", !Split ["-", !Ref StackName]]
                   - !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${StackName}*"
                   - !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/aws-sam-cli-managed-default*"
               - Sid: RolesOfTheStackOnly
