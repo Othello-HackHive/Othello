@@ -103,6 +103,8 @@ class FloorPlan(BaseModel):
 
 Derived helpers on `FloorPlan`: `eligible_rooms()`, `total_eligible_area_m2()`, `hub_lower_bound()`.
 
+For ResPlan development records, each source room and door component stays separate during normalization. Rooms are clipped to `inner`; smaller interior rooms own any area they share with a larger room, so an enclosed storage room or bathroom is not erased by a broad living-room polygon. A retained non-exterior room is an interior room. An inferred open passage is emitted only when a continuous crossing between its two rooms is covered by true free space. ResPlan has no fixed node coordinates, so the adapter generates temporary points and records when a source room cannot meet node clearance; organiser-provided fixed nodes will replace these points.
+
 ## 4. SolverConfig
 
 All settings, with their default and status. Nothing here is a hidden constant elsewhere in the code.
