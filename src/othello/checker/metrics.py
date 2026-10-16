@@ -83,17 +83,22 @@ def ring_points(ring: Ring, tol: float) -> Polyline:
 # ------------------------------------------------------------------ bends
 
 
+def bend_points_closed(points: list[Coord], tol: float) -> list[Coord]:
+    """Where a closed ring turns, including the turn where it closes at the hub."""
+    pts = clean_polyline(points, tol)
+    pieces = [(a, direction(a, b, tol)) for a, b in itertools.pairwise(pts)]
+    pieces = [piece for piece in pieces if piece[1] != (0, 0)]
+    if len(pieces) < 2:
+        return []
+    turns = [after[0] for before, after in itertools.pairwise(pieces) if before[1] != after[1]]
+    if pieces[-1][1] != pieces[0][1]:  # closing turn at the hub
+        turns.append(pieces[0][0])
+    return turns
+
+
 def count_bends_closed(points: list[Coord], tol: float) -> int:
     """Turns along a closed ring, including the turn where it closes at the hub."""
-    pts = clean_polyline(points, tol)
-    dirs = [direction(a, b, tol) for a, b in itertools.pairwise(pts)]
-    dirs = [d for d in dirs if d != (0, 0)]
-    if len(dirs) < 2:
-        return 0
-    bends = sum(1 for a, b in itertools.pairwise(dirs) if a != b)
-    if dirs[-1] != dirs[0]:  # closing turn at the hub
-        bends += 1
-    return bends
+    return len(bend_points_closed(points, tol))
 
 
 # ------------------------------------------------------------ segments
@@ -140,7 +145,18 @@ def count_crossings(
     t_touch_counts: bool = True,
     overlap_endpoint_counts: bool = False,
 ) -> int:
-    """Distinct points where two cables meet away from a node or hub.
+    """How many distinct points where two cables meet away from a node or hub."""
+    return len(crossing_points(legs, anchors, tol, t_touch_counts, overlap_endpoint_counts))
+
+
+def crossing_points(
+    legs: list[Polyline],
+    anchors: list[Coord],
+    tol: float = 0.001,
+    t_touch_counts: bool = True,
+    overlap_endpoint_counts: bool = False,
+) -> list[Coord]:
+    """The distinct points where two cables meet away from a node or hub.
 
     * Meeting at an anchor (node or hub) never counts.
     * A cable bending at its own corner never counts.
@@ -185,7 +201,7 @@ def count_crossings(
                     continue
             found.append(point)
 
-    return len(_distinct_points([p for p in found if not is_anchor(p)], tol))
+    return _distinct_points([p for p in found if not is_anchor(p)], tol)
 
 
 def _overlap_end_points(s: Segment, t: Segment, tol: float) -> list[Coord]:
@@ -205,45 +221,56 @@ def _overlap_end_points(s: Segment, t: Segment, tol: float) -> list[Coord]:
 # ----------------------------------------------------------------- overlap
 
 
-def _group_lines(lines: list[tuple[float, float, float]], tol: float) -> list[list[tuple[float, float]]]:
-    """Group (line_coord, lo, hi) pieces whose line is within tol into the same line."""
-    groups: list[list[tuple[float, float]]] = []
+def _group_lines(
+    lines: list[tuple[float, float, float]], tol: float
+) -> list[tuple[float, list[tuple[float, float]]]]:
+    """Group (line_coord, lo, hi) pieces whose line is within tol into the same line.
+
+    Each group is (the line's coordinate, [(lo, hi), ...]).
+    """
+    groups: list[tuple[float, list[tuple[float, float]]]] = []
     last_coord: float | None = None
     for coord, lo, hi in sorted(lines):
         if last_coord is None or coord - last_coord > tol:
-            groups.append([])
-        groups[-1].append((lo, hi))
+            groups.append((coord, []))
+        groups[-1][1].append((lo, hi))
         last_coord = coord
     return groups
 
 
-def _covered_extra_length(intervals: list[tuple[float, float]], tol: float) -> float:
-    """Sum of (k-1) * length over stretches covered by k >= 2 pieces."""
+def _covered_stretches(intervals: list[tuple[float, float]], tol: float) -> list[tuple[float, float, int]]:
+    """The stretches covered by k >= 2 pieces, as (start, end, k)."""
     cuts = sorted({v for lo, hi in intervals for v in (lo, hi)})
-    total = 0.0
+    found: list[tuple[float, float, int]] = []
     for left, right in itertools.pairwise(cuts):
         if right - left <= tol:
             continue
         mid = (left + right) / 2
         k = sum(1 for lo, hi in intervals if lo < mid < hi)
         if k > 1:
-            total += (k - 1) * (right - left)
-    return total
+            if found and found[-1][2] == k and abs(found[-1][1] - left) <= tol:
+                found[-1] = (found[-1][0], right, k)  # join neighbouring stretches covered the same
+            else:
+                found.append((left, right, k))
+    return found
+
+
+def overlap_stretches(legs: list[Polyline], tol: float = 0.001) -> list[tuple[Coord, Coord, int]]:
+    """Every stretch where cables lie on one line: (start, end, how many cover it)."""
+    segments = build_segments(legs, tol)
+    horizontal = [(s.a[1], min(s.a[0], s.b[0]), max(s.a[0], s.b[0])) for s in segments if s.horizontal(tol)]
+    vertical = [(s.a[0], min(s.a[1], s.b[1]), max(s.a[1], s.b[1])) for s in segments if s.vertical(tol)]
+    found: list[tuple[Coord, Coord, int]] = []
+    for y, intervals in _group_lines(horizontal, tol):
+        found.extend(((lo, y), (hi, y), k) for lo, hi, k in _covered_stretches(intervals, tol))
+    for x, intervals in _group_lines(vertical, tol):
+        found.extend(((x, lo), (x, hi), k) for lo, hi, k in _covered_stretches(intervals, tol))
+    return found
 
 
 def overlap_length(legs: list[Polyline], tol: float = 0.001) -> float:
-    segments = build_segments(legs, tol)
-    horizontal = [
-        (s.a[1], min(s.a[0], s.b[0]), max(s.a[0], s.b[0])) for s in segments if s.horizontal(tol)
-    ]
-    vertical = [
-        (s.a[0], min(s.a[1], s.b[1]), max(s.a[1], s.b[1])) for s in segments if s.vertical(tol)
-    ]
-    total = 0.0
-    for lines in (horizontal, vertical):
-        for group in _group_lines(lines, tol):
-            total += _covered_extra_length(group, tol)
-    return total
+    """A stretch covered by k pieces counts (k - 1) times its length."""
+    return sum((k - 1) * math.dist(a, b) for a, b, k in overlap_stretches(legs, tol))
 
 
 # -------------------------------------------------------------------- cost
@@ -261,6 +288,46 @@ def area_gap(hub_areas: dict[str, float]) -> float:
     return max(hub_areas.values()) - min(hub_areas.values())
 
 
+def collect_legs_and_anchors(design: Design, tol: float) -> tuple[list[Polyline], list[Coord]]:
+    """Every cleaned leg of the design, and the anchors (hub spots and node spots)."""
+    legs: list[Polyline] = []
+    anchors: list[Coord] = []
+    for hub in design.hubs:
+        anchors.append((float(hub.location[0]), float(hub.location[1])))
+        for leg in hub.ring.legs:
+            cleaned = clean_polyline(leg.polyline, tol)
+            legs.append(cleaned)
+            if cleaned:
+                anchors.append(cleaned[0])
+                anchors.append(cleaned[-1])
+    return legs, anchors
+
+
+def design_markers(design: Design, config: SolverConfig | None = None) -> dict[str, list]:
+    """WHERE the costs are: crossing points, overlapping stretches and bend points.
+
+    {"crossings": [[x, y]], "overlaps": [[[x1, y1], [x2, y2]]], "bends": [[x, y]]}
+    The counts match ``compute_metrics`` exactly (same functions, same tolerance).
+    """
+    cfg = config or SolverConfig()
+    tol = cfg.tolerance_m
+    legs, anchors = collect_legs_and_anchors(design, tol)
+    crossings = crossing_points(
+        legs,
+        anchors,
+        tol,
+        t_touch_counts=cfg.t_touch_counts_as_crossing,
+        overlap_endpoint_counts=cfg.overlap_endpoint_crossing,
+    )
+    overlaps = [[a, b] for a, b, _ in overlap_stretches(legs, tol)]
+    bends = [point for hub in design.hubs for point in bend_points_closed(ring_points(hub.ring, tol), tol)]
+    return {
+        "crossings": [list(p) for p in crossings],
+        "overlaps": overlaps,
+        "bends": [list(p) for p in bends],
+    }
+
+
 def compute_metrics(
     design: Design,
     config: SolverConfig | None = None,
@@ -270,21 +337,12 @@ def compute_metrics(
     cfg = config or SolverConfig()
     tol = cfg.tolerance_m
 
-    legs: list[Polyline] = []
-    anchors: list[Coord] = []
+    legs, anchors = collect_legs_and_anchors(design, tol)
     per_hub: dict[str, dict] = {}
     total_bends = 0
 
     for hub in design.hubs:
-        anchors.append((float(hub.location[0]), float(hub.location[1])))
-        hub_length = 0.0
-        for leg in hub.ring.legs:
-            cleaned = clean_polyline(leg.polyline, tol)
-            legs.append(cleaned)
-            hub_length += polyline_length(cleaned)
-            if cleaned:
-                anchors.append(cleaned[0])
-                anchors.append(cleaned[-1])
+        hub_length = sum(polyline_length(clean_polyline(leg.polyline, tol)) for leg in hub.ring.legs)
         bends = count_bends_closed(ring_points(hub.ring, tol), tol)
         total_bends += bends
         per_hub[hub.hub_id] = {

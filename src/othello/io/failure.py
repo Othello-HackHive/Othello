@@ -10,8 +10,6 @@ answer.  It never contains an invented design.
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 import traceback
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,7 +17,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from othello.io.errors import OthelloError, OutputWriteError
+from othello.io.atomic import atomic_write_text
+from othello.io.errors import OthelloError
 
 SCHEMA_VERSION = 1
 MAX_VIOLATIONS_SHOWN = 50
@@ -107,21 +106,7 @@ def _violation_details(violations: list[Any]) -> dict[str, Any]:
 
 def write_failure_json(report: FailureReport, path: str | Path) -> Path:
     """Write the failure note in one go (never leaves a half-written file)."""
-    target = Path(path)
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        handle, temp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
-        try:
-            with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                json.dump(report.model_dump(mode="json"), stream, indent=2)
-                stream.write("\n")
-            os.replace(temp_name, target)
-        except BaseException:
-            Path(temp_name).unlink(missing_ok=True)
-            raise
-    except OSError as problem:
-        raise OutputWriteError(f"could not write {target}: {problem}") from problem
-    return target
+    return atomic_write_text(path, json.dumps(report.model_dump(mode="json"), indent=2) + "\n")
 
 
 def read_failure_json(path: str | Path) -> FailureReport:

@@ -24,12 +24,11 @@ from __future__ import annotations
 import itertools
 import json
 import math
-import os
-import tempfile
 from pathlib import Path
 from typing import Any
 
 from othello.checker.validate import check_design
+from othello.io.atomic import atomic_write_text
 from othello.io.errors import OthelloError
 from othello.models.config import SolverConfig
 from othello.models.design import Design, Hub, Ring, RouteLeg
@@ -206,17 +205,7 @@ def write_official_json(
     if problems:  # a bug in this module, never a user error
         raise RuntimeError(f"official JSON would break the format: {problems}")
 
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    handle, temp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            json.dump(data, stream, indent=2)
-            stream.write("\n")
-        os.replace(temp_name, target)
-    except BaseException:
-        Path(temp_name).unlink(missing_ok=True)
-        raise
+    atomic_write_text(path, json.dumps(data, indent=2) + "\n")
     return result
 
 

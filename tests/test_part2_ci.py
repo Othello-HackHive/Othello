@@ -51,6 +51,10 @@ def test_ruff_is_pinned_so_the_rules_do_not_drift():
     assert 'ruff==' in text()
 
 
+def test_matplotlib_is_installed_so_the_picture_tests_really_run():
+    assert "matplotlib==" in text()
+
+
 def test_it_covers_the_oldest_supported_python_and_a_current_one():
     body = text()
     assert '"3.11"' in body and '"3.13"' in body
