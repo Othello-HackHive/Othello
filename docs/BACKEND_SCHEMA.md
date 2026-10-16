@@ -29,10 +29,11 @@ Coord = tuple[float, float]            # (x, y) in metres unless a name ends wit
 Polyline = list[Coord]                 # >= 2 points; every segment horizontal or vertical
 
 class Violation(BaseModel):
-    type: str                          # see section 9 (violation codes)
+    type: str                          # see section 10 (violation codes)
     hub_id: str | None = None
     ring_id: str | None = None
     segment_index: int | None = None
+    point: Coord | None = None         # where it happened (metres), so the overlay can draw it in red
     detail: str = ""
 ```
 
@@ -80,7 +81,7 @@ class Opening(BaseModel):              # a door or an open passage
     opening_id: str                    # "D1" or "P1"
     kind: str                          # door | open_passage | entrance
     rooms: list[str]                   # rooms it joins (entrance joins only one + outside)
-    gap_polyline_m: Polyline           # the gap line the cable must cross
+    gap_polyline_m: Polyline           # a short line ACROSS the doorway, in the wall plane, with both ends in free space; the cable crosses it (it is not drawn along the cable's travel direction)
     counts_for_zone: bool              # false for entrance [CONFIRMED slide 3]
 
 class FloorPlan(BaseModel):
@@ -218,10 +219,18 @@ class Metrics(BaseModel):
     per_hub: dict[str, dict]           # per hub: area_m2, node_count, ring_length_m, bends
     area_gap_m2: float                 # tie-break value
 
+class RuleCheck(BaseModel):            # one line of the audit panel
+    rule_id: str
+    label: str
+    passed: bool
+    value: str = ""
+    detail: str = ""
+
 class ValidationResult(BaseModel):
     valid: bool
     violations: list[Violation]
     metrics: Metrics | None            # filled when computable (also when valid=False if possible)
+    checks: list[RuleCheck]            # per-rule pass/fail summary for the audit panel
 
 class SolveResult(BaseModel):
     status: str                        # "ok" | "no_design_found"
@@ -242,13 +251,18 @@ def generate_partitions(plan, hub_count, config, deadline) -> tuple[list[Partiti
 def hub_lower_bound(plan, config) -> int
 # Part 3
 def solve(plan, config, deadline) -> SolveResult      # uses Part 1 functions and returns a Design (not yet verified)
-# Part 2
-def check_design(plan, design, config) -> ValidationResult
-def score_design(plan, design, config) -> Metrics
-def write_official_json(plan, design, path) -> None
-def write_overlay_json(plan, result, path) -> None
-def run_plan(input_path, out_dir, config) -> SolveResult  # the runner: load, solve, check, write
+# Part 2   (othello.checker, othello.io, othello.run)
+def check_design(plan, design, config=None) -> ValidationResult   # accepts a Design or a dict; a bad design gives valid=False, never an exception
+def score_design(plan, design, config=None) -> Metrics            # L, X, O, B, J and the area gap from the polylines only
+def write_official_json(plan, design, path, config=None) -> ValidationResult
+                                                                  # re-checks the rounded numbers; raises UnverifiedDesignError and writes nothing if invalid
+def write_overlay_json(plan, design, validation, path, **options) -> Path   # also for invalid or missing designs
+def write_plan_picture(plan, design, validation, path, **options) -> Path   # debug PNG (needs matplotlib)
+def run_plan(source, out_dir, config=None, **options) -> RunOutcome         # the runner: load, solve, check, write; never raises for a plan-level problem
+def run_batch(source, out_dir, config=None, summary_path=None, **options) -> list[RunOutcome]
 ```
+
+`RunOutcome` is the runner's own result (plan_id, status `ok` | `no_design_found` | `failed`, hubs, lower_bound, proven_min, metrics, runtime_s, notes, files, failure). It is not part of the hand-off contracts.
 
 ## 8. Official output JSON (the only file the organiser reads) [CONFIRMED slide 8]
 
@@ -284,45 +298,20 @@ Notes:
 - The `route_segments` array lists **every** leg including the return to the hub (the example above is abridged on slide 8).
 - `reported_metrics` is ignored by the checker [CONFIRMED slide 6] but we still write correct values.
 - Polyline coordinates are rounded to `output_precision_decimals`.
-- The writer maps internal coordinates with `to_output_coords` (one function; [PENDING P6]).
-- The serialiser builds this file from a `Design` only if `ValidationResult.valid` is true.
+- The writer maps internal coordinates with `to_output_coords` (one function; [PENDING P6]). Default: no change, so output uses the plan's own origin with y up. `FloorPlan.output_transform` may hold `dx`, `dy` (added) and `flip_y` (y negated before `dy` is added); `from_output_coords` is its exact inverse.
+- The serialiser builds this file from a `Design` only if `ValidationResult.valid` is true. The check runs on the rounded numbers that will actually be written.
 
 ## 9. Overlay JSON (our own file, for Ritvik's frontend; never submitted)
 
-Written next to the official file as `<plan_id>.overlay.json`. The frontend can ignore everything except this file and the official JSON.
+Written next to the official file as `<plan_id>.overlay.json`. The frontend can ignore everything except this file and the official JSON. It carries `schema_version` (currently `1`) and a `status` (`ok`, `invalid` or `no_design_found`), and it is also written when no design exists, so the house can still be drawn.
 
-```json
-{
-  "plan_id": "PLAN_0123",
-  "status": "ok",
-  "units": "m",
-  "bounds": {"min": [0, 0], "max": [11.1, 9.9]},
-  "geometry": {
-    "inner": [[0,0],[11.1,0],[11.1,9.9],[0,9.9]],
-    "walls": [ [[...]] ],
-    "windows": [ [[...]] ],
-    "rooms": [{"room_id": "R01", "kind": "bedroom", "eligible": true, "polygon": [[...]], "area_m2": 16.0}],
-    "openings": [{"opening_id": "D1", "kind": "door", "gap": [[...]], "rooms": ["R01", "R04"]}]
-  },
-  "nodes": [{"node_id": "N1", "room_id": "R01", "point": [1.5, 2.2], "hub_id": "H1", "order": 2}],
-  "hubs": [{"hub_id": "H1", "point": [5.2, 3.6], "color_index": 0,
-            "rooms": ["R05", "R01", "R04"],
-            "sequence": ["H1", "N1", "N3", "N2", "H1"],
-            "legs": [{"from": "H1", "to": "N1", "order": 1, "polyline": [[...]]}]}],
-  "violations": [{"type": "WALL_INTERSECTION", "hub_id": "H2", "segment_index": 3, "point": [4.1, 2.0]}],
-  "markers": {"crossings": [[x, y]], "overlaps": [[[x1, y1], [x2, y2]]], "bends": [[x, y]]},
-  "metrics": {"hub_count": 2, "L": 49.0, "X": 0, "O": 0.0, "B": 20, "J": 59.0,
-              "per_hub": {"H1": {"area_m2": 71.0, "nodes": 3, "ring_length_m": 23.8, "bends": 8}}},
-  "bounds_report": {"lower_bound_hubs": 2, "proven_minimum": true, "tried": {"2": "feasible"}},
-  "runtime_s": 12.4
-}
-```
+The full field-by-field description is in **[OVERLAY_FORMAT.md](OVERLAY_FORMAT.md)**, and real examples (kept up to date by a test) are in `tests/data/samples/`. Those two are the reference; this section does not repeat them.
 
 Fixed visual conventions (for the overlay): zones coloured per hub, hub as a square, node as a dot, numbers give visiting order with the last number being the return to the hub, excluded rooms shown grey, violations red. [CONFIRMED slide 3, 5]
 
 ## 10. Violation codes
 
-`COVERAGE_MISSING`, `COVERAGE_DUPLICATE`, `CAPACITY_NODES`, `CAPACITY_AREA`, `ZONE_DISCONNECTED`, `HUB_NOT_IN_ROOM`, `HUB_WALL_CLEARANCE`, `RING_NOT_CLOSED`, `RING_WRONG_HUB`, `RING_NODE_MISSING`, `RING_NODE_REPEATED`, `RING_BRANCH`, `SEGMENT_NOT_AXIS_ALIGNED`, `WALL_INTERSECTION`, `WINDOW_INTERSECTION`, `OUTSIDE_INNER`, `ROOM_TRANSITION_NOT_VIA_OPENING`, `NODE_MOVED`, `OUTPUT_SCHEMA`.
+`COVERAGE_MISSING`, `COVERAGE_DUPLICATE`, `CAPACITY_NODES`, `CAPACITY_AREA`, `ZONE_DISCONNECTED`, `HUB_NOT_IN_ROOM`, `HUB_WALL_CLEARANCE`, `RING_NOT_CLOSED`, `RING_WRONG_HUB`, `RING_NODE_MISSING`, `RING_NODE_REPEATED`, `RING_BRANCH`, `SEGMENT_NOT_AXIS_ALIGNED`, `WALL_INTERSECTION`, `WINDOW_INTERSECTION`, `OUTSIDE_INNER`, `ROOM_TRANSITION_NOT_VIA_OPENING`, `NODE_MOVED`, `OUTPUT_SCHEMA`. The same list lives in `othello.models.result.VIOLATION_CODES`.
 
 Crossings and overlaps are **never** violations; they only raise J. [CONFIRMED slide 6]
 
@@ -333,8 +322,19 @@ Crossings and overlaps are **never** violations; they only raise J. [CONFIRMED s
 | A plan has an eligible room over 100 m² | `status = "no_design_found"`, note explains (A14) |
 | No partition exists for any hub count tried | `no_design_found`, notes list tried counts |
 | Time ran out before any verified design | `no_design_found`, note "timeout" |
+| Time ran out but a verified design exists | success: the best verified design is written, with a note |
 | Checker rejects the best candidate | Try the next candidate; if none passes, `no_design_found`; never write an invalid official JSON |
-| Input adapter cannot read a plan | Raise `InputError` with the field name; the runner records it and continues in batch mode |
+| Input adapter cannot read a plan | `InputError` with the field name; the runner records it and continues in batch mode |
+
+Every failure becomes one file, `<plan_id>.failure.json` (named after the input file when the plan could not be read), and **no** official JSON and no picture. Old results of an earlier run are deleted so nothing stale looks current. The note has these fields:
+
+```json
+{"schema_version": 1, "status": "failed", "plan_id": "PLAN_0123",
+ "code": "NO_DESIGN_FOUND", "stage": "solve", "message": "...", "hint": "...",
+ "details": {}, "settings_changed": {}, "created_at": "2026-10-16T12:00:00Z"}
+```
+
+`code` is one of `BAD_INPUT`, `INPUT_NOT_FOUND`, `BAD_SETTINGS`, `NO_DESIGN_FOUND`, `DESIGN_INVALID`, `OUTPUT_WRITE_FAILED`, `IO_ERROR`, `INTERNAL_ERROR`. `stage` is one of `load`, `settings`, `solve`, `check`, `write`, `unknown`. `settings_changed` lists only the settings that differ from the defaults. The same codes live in `othello.io.errors`.
 
 ## 12. File layout and ownership of schema
 
