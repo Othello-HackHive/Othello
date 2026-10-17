@@ -42,6 +42,13 @@ type EventsReply = {
   next: number;
 };
 
+export class CloudApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "CloudApiError";
+  }
+}
+
 const headers = (): HeadersInit => ({
   ...(apiKey ? { "x-api-key": apiKey } : {}),
 });
@@ -56,7 +63,7 @@ async function getJson<T>(path: string, signal: AbortSignal, init?: RequestInit)
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { error?: { code?: string; message?: string; hint?: string } } | null;
     const problem = body?.error;
-    throw new Error([problem?.message ?? `API request failed (${response.status})`, problem?.hint].filter(Boolean).join(" — "));
+    throw new CloudApiError([problem?.message ?? `API request failed (${response.status})`, problem?.hint].filter(Boolean).join(" — "), response.status);
   }
   return response.json() as Promise<T>;
 }

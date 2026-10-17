@@ -4,8 +4,10 @@
     POST   /api/jobs                        upload a plan (+ optional settings) and start a job   -> 202
     GET    /api/jobs/{id}                   status, summary, links to the result files
     GET    /api/jobs/{id}/events?after=N    progress steps since step N (poll this for the live view)
-    GET    /api/jobs/{id}/result/{kind}     one result file: overlay | official | failure | picture | log | settings
+    GET    /api/jobs/{id}/result/{kind}     one result file: overlay | official | baseline | failure | picture | log | settings
     POST   /api/jobs/{id}/cancel            stop a queued or running job
+    POST   /api/jobs/{id}/validate          check an edited candidate against the original plan
+    POST   /api/jobs/{id}/reroute           reroute a moved hub's ring on AWS and check it
     DELETE /api/jobs/{id}                   forget a finished job and its files
 
 The same ``Api`` object is used by the local web server and by the AWS Lambda handler.
@@ -50,7 +52,7 @@ SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
 }
-JOB_PATH = re.compile(r"^/api/jobs/([^/]+)(?:/(events|cancel|result)(?:/([^/]+))?)?$")
+JOB_PATH = re.compile(r"^/api/jobs/([^/]+)(?:/(events|cancel|validate|reroute|result)(?:/([^/]+))?)?$")
 
 
 @dataclass
@@ -227,6 +229,12 @@ class Api:
         if section == "cancel":
             self._only(method, "POST")
             return self._cancel(job_id)
+        if section == "validate":
+            self._only(method, "POST")
+            return self._validate(job_id, request)
+        if section == "reroute":
+            self._only(method, "POST")
+            return self._reroute(job_id, request)
         self._only(method, "GET")
         if kind is None:
             raise ApiError(
@@ -425,6 +433,72 @@ class Api:
                 f"this job has no '{kind}' file (status: {job.status})",
             )
         return Response(200, data, FILE_KINDS[kind][1])
+
+    def _validate(self, job_id: str, request: Request) -> Response:
+        """Check a user-edited route without replacing the job's official answer."""
+        from othello.checker import check_design
+        from othello.io.official import design_from_official, official_schema_problems
+        from othello.service.plan_json import plan_from_json
+
+        job = self._job(job_id)
+        if job.status != "succeeded":
+            raise ApiError(409, "NOT_READY", "a completed solver job is required")
+        if len(request.body) > self.limits.max_upload_bytes:
+            raise ApiError(413, "TOO_LARGE", "candidate JSON is too large")
+        try:
+            candidate = json.loads(request.body)
+        except (ValueError, UnicodeDecodeError) as problem:
+            raise ApiError(400, "BAD_REQUEST", "candidate must be valid JSON") from problem
+        problems = official_schema_problems(candidate)
+        if problems:
+            raise ApiError(400, "BAD_REQUEST", "; ".join(problems[:5]))
+        source = self.store.get_file(job_id, "input")
+        if source is None:
+            raise ApiError(404, "NOT_FOUND", "the original plan is unavailable")
+        cfg, _ = build_job_config(job.settings, self.limits)
+        plan = plan_from_json(source, cfg)
+        if candidate["plan_id"] != plan.plan_id:
+            raise ApiError(400, "BAD_REQUEST", "candidate plan_id does not match the uploaded plan")
+        validation = check_design(plan, design_from_official(plan, candidate), cfg)
+        return _json_response(200, validation.model_dump(mode="json"))
+
+    def _reroute(self, job_id: str, request: Request) -> Response:
+        """Solve the edited hub's ring in this Lambda without changing the saved job."""
+        from othello.io.official import design_from_official, official_schema_problems
+        from othello.service.plan_json import plan_from_json
+        from othello.solver.fixed_hub import solve_fixed_hub_edit
+
+        job = self._job(job_id)
+        if job.status != "succeeded":
+            raise ApiError(409, "NOT_READY", "a completed solver job is required")
+        if len(request.body) > self.limits.max_upload_bytes:
+            raise ApiError(413, "TOO_LARGE", "candidate JSON is too large")
+        try:
+            body = json.loads(request.body)
+        except (ValueError, UnicodeDecodeError) as problem:
+            raise ApiError(400, "BAD_REQUEST", "reroute request must be valid JSON") from problem
+        if not isinstance(body, dict) or not isinstance(body.get("hub_id"), str):
+            raise ApiError(400, "BAD_REQUEST", "send a hub_id and official-schema candidate")
+        candidate = body.get("candidate")
+        problems = official_schema_problems(candidate)
+        if problems:
+            raise ApiError(400, "BAD_REQUEST", "; ".join(problems[:5]))
+        source = self.store.get_file(job_id, "input")
+        if source is None:
+            raise ApiError(404, "NOT_FOUND", "the original plan is unavailable")
+        cfg, _ = build_job_config(job.settings, self.limits)
+        plan = plan_from_json(source, cfg)
+        if candidate["plan_id"] != plan.plan_id:
+            raise ApiError(400, "BAD_REQUEST", "candidate plan_id does not match the uploaded plan")
+        try:
+            solved = solve_fixed_hub_edit(plan, design_from_official(plan, candidate), body["hub_id"], cfg)
+        except ValueError as problem:
+            raise ApiError(400, "BAD_REQUEST", str(problem)) from problem
+        if solved is None:
+            raise ApiError(422, "NO_VALID_ROUTE", "AWS could not find a checker-valid ring at this hub position",
+                           "move the hub within its assigned room and try again")
+        official, validation = solved
+        return _json_response(200, {"official": official, "validation": validation.model_dump(mode="json")})
 
     def _cancel(self, job_id: str) -> Response:
         job = self._job(job_id)
