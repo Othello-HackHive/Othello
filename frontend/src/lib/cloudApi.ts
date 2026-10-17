@@ -108,7 +108,7 @@ export async function solveCloudPlan(
   settings: Record<string, unknown> | null,
   signal: AbortSignal,
   onProgress: (progress: CloudProgress) => void,
-): Promise<{ official: Record<string, unknown>; officialText: string; overlay: Record<string, unknown>; baseline: Record<string, unknown> | null; jobId: string }> {
+): Promise<{ official: Record<string, unknown>; officialText: string; overlay: Record<string, unknown>; baseline: Record<string, unknown> | null; baselineMetrics: CloudEvent["metrics"] | null; jobId: string }> {
   if (!cloudAvailable) throw new Error("Set VITE_OTHELLO_API_URL before building the website.");
   const payload = settings ? { plan, settings } : plan;
   const started = await getJson<JobReply>("/api/jobs", signal, {
@@ -132,10 +132,12 @@ export async function solveCloudPlan(
   try {
     let next = 0;
     let done = false;
+    let baselineMetrics: CloudEvent["metrics"] | null = null;
     while (!done) {
       const page = await getJson<EventsReply>(`/api/jobs/${jobId}/events?after=${next}`, signal);
       next = page.next;
       done = page.done;
+      baselineMetrics ??= page.events.find((event) => event.candidate_kind === "baseline")?.metrics ?? null;
       onProgress({ jobId, status: page.status, events: page.events });
       if (!done) await waitForPoll(signal);
     }
@@ -150,9 +152,20 @@ export async function solveCloudPlan(
     const [official, overlay, baseline] = await Promise.all([
       getJson<Record<string, unknown>>(`/api/jobs/${jobId}/result/official`, signal),
       getJson<Record<string, unknown>>(`/api/jobs/${jobId}/result/overlay`, signal),
-      job.files?.baseline ? getJson<Record<string, unknown>>(`/api/jobs/${jobId}/result/baseline`, signal) : Promise.resolve(null),
+      getJson<Record<string, unknown>>(`/api/jobs/${jobId}/result/baseline`, signal).catch(() => null),
     ]);
-    return { official, officialText: JSON.stringify(official, null, 2), overlay, baseline, jobId };
+    if (baseline && !baselineMetrics && !signal.aborted) {
+      try {
+        const checked = await validateCloudEdit(jobId, baseline, signal);
+        if (checked.valid && checked.metrics) {
+          const { L, X, O, B, J } = checked.metrics;
+          baselineMetrics = { L, X, O, B, J };
+        }
+      } catch {
+        // Older API deployments may not support candidate validation.
+      }
+    }
+    return { official, officialText: JSON.stringify(official, null, 2), overlay, baseline, baselineMetrics, jobId };
   } finally {
     signal.removeEventListener("abort", cancel);
   }
