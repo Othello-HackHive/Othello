@@ -538,6 +538,7 @@ export default function App() {
 
   const hasSelectedPlan = planKey !== "";
   const cloudRunning = cloudState?.status === "queued" || cloudState?.status === "running";
+  const hubEditRunning = draftStatus === "checking";
   const sceneOverlay = useMemo(() => draftSolution && overlayDraw
     ? { ...overlayDraw, legs: [], violations: [], crossings: [], overlaps: [], bends: [] }
     : isBackend ? overlayDraw : null, [draftSolution, overlayDraw, isBackend]);
@@ -743,17 +744,21 @@ export default function App() {
               }}
             />
             <div className="hero-actions">
-              <button type="button" className="primary-action" onClick={runSolver} disabled={runState === "solving" || cloudRunning || !plan || !hasSelectedPlan}>
-                {runState === "solving" || cloudRunning ? <LoaderCircle size={16} className="spin" /> : <Play size={15} fill="currentColor" />}
-                {cloudRunning ? "SOLVING ON AWS…" : cloudPayloadRef.current && cloudAvailable ? "RERUN ON AWS" : runState === "solving" ? "REPLAYING…" : "REPLAY SOLUTION STEPS"}
+              <button type="button" className="primary-action" onClick={runSolver} disabled={runState === "solving" || cloudRunning || hubEditRunning || !plan || !hasSelectedPlan} aria-busy={cloudRunning || hubEditRunning}>
+                {runState === "solving" || cloudRunning || hubEditRunning ? <LoaderCircle size={16} className="spin" /> : <Play size={15} fill="currentColor" />}
+                {hubEditRunning ? "REROUTING HUB ON AWS…" : cloudRunning ? "SOLVING ON AWS…" : cloudPayloadRef.current && cloudAvailable ? "RERUN ON AWS" : runState === "solving" ? "REPLAYING…" : "REPLAY SOLUTION STEPS"}
               </button>
               <a href="#territories" className="scroll-action">SEE HOW IT WAS DERIVED <ChevronDown size={16} /></a>
             </div>
             {cloudState && (
-              <p className={cloudState.status === "failed" ? "cloud-message cloud-error" : "cloud-message"} role="status">
-                {cloudState.status === "succeeded"
-                  ? "AWS solution and checker overlay loaded."
-                  : cloudState.error ?? cloudState.events.at(-1)?.message ?? "Submitting plan to the AWS solver…"}
+              <p className={cloudState.status === "failed" || draftStatus === "invalid" || (draftStatus === "preview" && draftMessage) ? "cloud-message cloud-error" : "cloud-message"} role="status">
+                {hubEditRunning
+                  ? "AWS is rerouting the moved hub and checking the new score…"
+                  : draftStatus && draftMessage
+                    ? draftMessage
+                    : cloudState.status === "succeeded"
+                      ? "AWS solution and checker overlay loaded."
+                      : cloudState.error ?? cloudState.events.at(-1)?.message ?? "Submitting plan to the AWS solver…"}
               </p>
             )}
             {planError && (
