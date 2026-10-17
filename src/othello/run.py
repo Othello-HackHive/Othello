@@ -394,7 +394,7 @@ def _solve_and_write(
             try:
                 write_official_json(plan, coerce_design(design), baseline_path, config)
                 outcome.files["baseline"] = baseline_path
-            except Exception as problem:  # baseline is supplementary; official output still proceeds
+            except Exception as problem:  # noqa: BLE001  baseline is supplementary; official output still proceeds
                 log.warning("F0 baseline export unavailable: %s", problem)
 
     arguments = (plan, batches, config, checker, None, search_deadline, lower_bound)

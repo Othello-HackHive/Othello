@@ -230,10 +230,11 @@ def test_safe_name_never_contains_a_separator():
 
 def test_output_paths_all_live_inside_the_output_folder(tmp_path):
     paths = output_paths(tmp_path, "../../evil")
-    assert set(paths) == {"official", "overlay", "picture", "log", "failure", "settings"}
+    assert set(paths) == {"official", "baseline", "overlay", "picture", "log", "failure", "settings"}
     for path in paths.values():
         assert path.resolve().parent == tmp_path.resolve()
     assert paths["official"].name == "evil.json"
+    assert paths["baseline"].name == "evil.baseline.json"
     assert paths["overlay"].name == "evil.overlay.json"
     assert paths["failure"].name == "evil.failure.json"
     assert paths["log"].name == "evil.log.txt"

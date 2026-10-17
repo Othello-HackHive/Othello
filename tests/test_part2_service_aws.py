@@ -258,7 +258,7 @@ def test_a_whole_job_runs_on_the_aws_store(store):
     store.create(job, as_bytes(one_room_upload()))
     done = execute_job(store, job.job_id, ServiceConfig())
     assert done.status == "succeeded" and done.plan_id == "UP_1"
-    assert set(done.files) == {"official", "overlay", "picture", "log", "settings"}
+    assert set(done.files) == {"official", "baseline", "overlay", "picture", "log", "settings"}
     assert json.loads(store.get_file(job.job_id, "official"))["plan_id"] == "UP_1"
     assert store.get_file(job.job_id, "picture")[:4] == b"\x89PNG"
     stages = [e["stage"] for e in store.events(job.job_id)]
