@@ -29,13 +29,21 @@ import {
   X,
   ZoomIn,
   ZoomOut,
+  FileDown,
+  GitCompareArrows,
+  Share2,
+  Activity,
+  MoreHorizontal,
 } from "lucide-react";
 import TwinScene, { type CameraPresetId, type Inspection } from "./components/TwinScene";
+import CostHistory from "./components/CostHistory";
+import SolutionReport from "./components/SolutionReport";
 import { normalizePlan, PRESET_IDS, PRESET_JSON, type PlanModel } from "./lib/resplan";
 import { optimize, type Solution } from "./lib/optimizer";
 import { parseOverlay, solutionFromOfficial, type OverlayDraw } from "./lib/overlay";
-import { cloudAvailable, isCloudPlan, solveCloudPlan, type CloudEvent } from "./lib/cloudApi";
+import { cloudAvailable, isCloudPlan, solveCloudPlan, validateCloudEdit, type CloudEvent } from "./lib/cloudApi";
 import { viewerPlanFromCloud } from "./lib/cloudPlan";
+import { createShareLink, readShareLink, type SharedView } from "./lib/shareLink";
 
 const phases = ["IMPORT", "ZONES", "ROUTE", "AUDIT"];
 
@@ -68,6 +76,10 @@ const backendStages = [
   "score complete rings and run the independent checker",
 ];
 
+const ignoreInspection = (_item: Inspection | null) => undefined;
+const ignorePhase = (_phase: number) => undefined;
+const ignoreScrollView = () => undefined;
+
 type RunState = "ready" | "solving" | "verified";
 type CloudState = { status: string; jobId?: string; events: CloudEvent[]; error?: string };
 type CloudPayload = { raw: Record<string, unknown>; viewer: Record<string, unknown>; settings: Record<string, unknown> | null; key: string };
@@ -80,6 +92,7 @@ export default function App() {
   const [warnings, setWarnings] = useState<string[]>([]);
   const [showZones, setShowZones] = useState(true);
   const [showRoutes, setShowRoutes] = useState(true);
+  const [showHeatmap, setShowHeatmap] = useState(false);
   const [panelCollapsed, setPanelCollapsed] = useState(true);
   const [modelView, setModelView] = useState(false);
   const modelViewRef = useRef(modelView);
@@ -99,10 +112,21 @@ export default function App() {
   const sliceSliderStyle = { "--range-progress": `${(wallSlice / 2.2) * 100}%` } as CSSProperties;
   const zoomSliderStyle = { "--range-progress": `${((zoomLevel - 0.65) / 1.15) * 100}%` } as CSSProperties;
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const toolbarMenuRef = useRef<HTMLDetailsElement>(null);
   const [copied, setCopied] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [official, setOfficial] = useState<{ text: string; data: Record<string, unknown>; name: string } | null>(null);
   const [overlayDraw, setOverlayDraw] = useState<OverlayDraw | null>(null);
+  const [draftSolution, setDraftSolution] = useState<Solution | null>(null);
+  const [draftStatus, setDraftStatus] = useState<"checking" | "valid" | "invalid" | "preview" | null>(null);
+  const [draftMessage, setDraftMessage] = useState("");
+  const draftControllerRef = useRef<AbortController | null>(null);
+  const [shareStatus, setShareStatus] = useState("");
+  const [shareUrl, setShareUrl] = useState("");
+  const [baselineData, setBaselineData] = useState<Record<string, unknown> | null>(null);
+  const [comparisonOpen, setComparisonOpen] = useState(false);
+  const [comparePosition, setComparePosition] = useState(50);
+  const [morphing, setMorphing] = useState(false);
   const [cloudState, setCloudState] = useState<CloudState | null>(null);
   const cloudControllerRef = useRef<AbortController | null>(null);
   const cloudPayloadRef = useRef<CloudPayload | null>(null);
@@ -139,12 +163,30 @@ export default function App() {
     }
   }, [plan, official, overlayDraw, resultDismissed]);
 
-  const activeSolution = resultSolution ?? solution;
-  const isBackend = resultSolution !== null;
+  const activeSolution = draftSolution ?? resultSolution ?? solution;
+  const isBackend = draftSolution ? draftStatus === "valid" || draftStatus === "invalid" : resultSolution !== null;
+  const baselineMetrics = cloudState?.events.find((event) => event.candidate_kind === "baseline")?.metrics;
+  const baselineSolution = useMemo<Solution | null>(() => {
+    if (!plan || !baselineData || !baselineMetrics || !resultSolution) return null;
+    try {
+      const result = solutionFromOfficial(baselineData, JSON.stringify(baselineData), plan, null);
+      return { ...result, metrics: { ...result.metrics, ...baselineMetrics } };
+    } catch {
+      return null;
+    }
+  }, [plan, baselineData, baselineMetrics, resultSolution]);
 
   const jsonText = useMemo(
-    () => (activeSolution ? (activeSolution.rawText ?? JSON.stringify(activeSolution.output, null, 2)) : "{}"),
-    [activeSolution],
+    () => {
+      if (!activeSolution) return "{}";
+      if (activeSolution.rawText) return activeSolution.rawText;
+      if (!draftSolution) return JSON.stringify(activeSolution.output, null, 2);
+      return JSON.stringify({
+        ...activeSolution.output,
+        reported_metrics: { hub_count: activeSolution.hubs.length, total_length_m: activeSolution.metrics.L },
+      }, null, 2);
+    },
+    [activeSolution, draftSolution],
   );
 
   useEffect(() => {
@@ -174,12 +216,44 @@ export default function App() {
   }, [modelView]);
 
   useEffect(() => () => cloudControllerRef.current?.abort(), []);
+  useEffect(() => () => draftControllerRef.current?.abort(), []);
+  useEffect(() => {
+    let cancelled = false;
+    void readShareLink(window.location.hash).then((shared) => {
+      if (!shared || cancelled) return;
+      setPlanKey(shared.key);
+      setRawPlan(shared.plan);
+      setPlanLabel(shared.label);
+      setOfficial(shared.official ? { ...shared.official, text: JSON.stringify(shared.official.data, null, 2) } : null);
+      setOverlayDraw(shared.overlay);
+      setBaselineData(shared.baseline);
+      setCloudState(shared.events.length ? { status: "shared", events: shared.events } : null);
+      setDraftSolution(shared.draft);
+      setDraftStatus(shared.draftStatus);
+      setShowZones(shared.view.zones);
+      setShowRoutes(shared.view.routes);
+      setShowHeatmap(shared.view.heatmap);
+      setWallSlice(shared.view.wallSlice);
+      setZoomLevel(shared.view.zoom);
+      setRunState("verified");
+      setPlanError(null);
+      setShareStatus("Shared result loaded.");
+    }).catch((error) => {
+      if (!cancelled) setShareStatus(error instanceof Error ? error.message : "Could not open the shared result.");
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   const loadPlan = useCallback((key: string, json: Record<string, unknown>, label: string) => {
     cloudControllerRef.current?.abort();
+    draftControllerRef.current?.abort();
+    setDraftSolution(null);
+    setDraftStatus(null);
     cloudControllerRef.current = null;
     cloudPayloadRef.current = null;
     setCloudState(null);
+    setBaselineData(null);
+    setComparisonOpen(false);
     setPlanKey(key);
     setRawPlan(json);
     setPlanLabel(label);
@@ -192,11 +266,16 @@ export default function App() {
 
   const startCloud = async (payload: CloudPayload) => {
     cloudControllerRef.current?.abort();
+    draftControllerRef.current?.abort();
+    setDraftSolution(null);
+    setDraftStatus(null);
     const controller = new AbortController();
     cloudControllerRef.current = controller;
     cloudPayloadRef.current = payload;
     setOfficial(null);
     setOverlayDraw(null);
+    setBaselineData(null);
+    setComparisonOpen(false);
     setResultDismissed(false);
     setRunState("ready");
     setCloudState({ status: "queued", events: [] });
@@ -213,6 +292,7 @@ export default function App() {
       const viewer = normalizePlan(payload.viewer, payload.key).plan;
       const draw = parseOverlay(result.overlay, viewer);
       setOverlayDraw(draw);
+      setBaselineData(result.baseline);
       setOfficial({ text: result.officialText, data: result.official, name: `${payload.key}.json` });
       setWarnings((current) => [...current, ...draw.warnings]);
       setCloudState((current) => ({ status: "succeeded", jobId: result.jobId, events: current?.events ?? [] }));
@@ -241,6 +321,9 @@ export default function App() {
       return;
     }
     setSelected(null);
+    draftControllerRef.current?.abort();
+    setDraftSolution(null);
+    setDraftStatus(null);
     setResultDismissed(true);
     setRunState("solving");
     setShowZones(true);
@@ -256,7 +339,12 @@ export default function App() {
   const loadOfficial = async (file: File) => {
     try {
       cloudControllerRef.current?.abort();
+      draftControllerRef.current?.abort();
+      setDraftSolution(null);
+      setDraftStatus(null);
       setCloudState(null);
+      setBaselineData(null);
+      setComparisonOpen(false);
       const text = await file.text();
       const data = JSON.parse(text) as Record<string, unknown>;
       const target = requirePlan();
@@ -275,7 +363,12 @@ export default function App() {
   const loadOverlayFile = async (file: File) => {
     try {
       cloudControllerRef.current?.abort();
+      draftControllerRef.current?.abort();
+      setDraftSolution(null);
+      setDraftStatus(null);
       setCloudState(null);
+      setBaselineData(null);
+      setComparisonOpen(false);
       const data = JSON.parse(await file.text()) as Record<string, unknown>;
       const target = requirePlan();
       if (!target) return;
@@ -292,7 +385,12 @@ export default function App() {
 
   const clearResult = () => {
     cloudControllerRef.current?.abort();
+    draftControllerRef.current?.abort();
+    setDraftSolution(null);
+    setDraftStatus(null);
     setCloudState(null);
+    setBaselineData(null);
+    setComparisonOpen(false);
     setOfficial(null);
     setOverlayDraw(null);
     setResultDismissed(true);
@@ -325,7 +423,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = isBackend ? (official?.name ?? "result.json") : `${activeSolution.plan_id.toLowerCase()}-solution.json`;
+    anchor.download = draftSolution ? `${activeSolution.plan_id.toLowerCase()}-edited-candidate.json` : isBackend ? (official?.name ?? "result.json") : `${activeSolution.plan_id.toLowerCase()}-solution.json`;
     anchor.click();
     URL.revokeObjectURL(url);
   };
@@ -339,16 +437,95 @@ export default function App() {
     }
   };
 
+  const shareResult = async () => {
+    if (!planKey || !activeSolution) return;
+    try {
+      const shared: SharedView = {
+        v: 1, key: planKey, label: planLabel, plan: rawPlan,
+        official: official ? { data: official.data, name: official.name } : null,
+        overlay: overlayDraw, baseline: baselineData,
+        events: cloudState?.events.filter((event) => event.stage === "candidate") ?? [],
+        draft: draftSolution, draftStatus: draftStatus === "checking" ? "preview" : draftStatus,
+        view: { zones: showZones, routes: showRoutes, heatmap: showHeatmap, wallSlice, zoom: zoomLevel },
+      };
+      const url = await createShareLink(shared);
+      setShareUrl(url);
+      await navigator.clipboard.writeText(url);
+      setShareStatus("Share link copied. Anyone with the link can view this result.");
+    } catch (error) {
+      setShareStatus(error instanceof Error ? error.message : "Could not create a share link.");
+    }
+  };
+
+  const handleHubMove = useCallback((hubId: string, position: [number, number]) => {
+    if (!plan || !activeSolution) return;
+    draftControllerRef.current?.abort();
+    try {
+      const edited = optimize(plan, undefined, { base: activeSolution, hubId, position });
+      setDraftSolution(edited);
+      setDraftMessage("");
+      setSelected(null);
+      const jobId = cloudState?.status === "succeeded" ? cloudState.jobId : undefined;
+      if (!jobId || !resultSolution) {
+        setDraftStatus("preview");
+        return;
+      }
+      const controller = new AbortController();
+      draftControllerRef.current = controller;
+      setDraftStatus("checking");
+      void validateCloudEdit(jobId, edited.output, controller.signal).then((validation) => {
+        if (controller.signal.aborted) return;
+        setDraftSolution({
+          ...edited,
+          source: "backend",
+          metrics: validation.metrics ? {
+            ...edited.metrics, L: validation.metrics.L, X: validation.metrics.X,
+            O: validation.metrics.O, B: validation.metrics.B, J: validation.metrics.J,
+            areaGap: validation.metrics.area_gap_m2,
+          } : edited.metrics,
+          checks: validation.checks.map((check) => ({
+            id: check.rule_id, label: check.label, pass: check.passed,
+            value: check.value, detail: check.detail,
+          })),
+        });
+        setDraftStatus(validation.valid ? "valid" : "invalid");
+        setDraftMessage(validation.valid ? "Edited route passed the independent checker." :
+          validation.violations.slice(0, 2).map((item) => `${item.type}: ${item.detail}`).join(" · ") || "Edited route failed the independent checker.");
+      }).catch((error) => {
+        if (controller.signal.aborted) return;
+        setDraftStatus("preview");
+        setDraftMessage(error instanceof Error ? error.message : "Could not check the edited route");
+      });
+    } catch (error) {
+      setDraftMessage(error instanceof Error ? error.message : "Could not reroute this hub");
+    }
+  }, [plan, activeSolution, cloudState?.status, cloudState?.jobId, resultSolution]);
+
+  const animateMorph = () => {
+    setMorphing(false);
+    setComparePosition(5);
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      setMorphing(true);
+      setComparePosition(95);
+      window.setTimeout(() => setMorphing(false), 1650);
+    }));
+  };
+
   const hasSelectedPlan = planKey !== "";
-  const metrics = hasSelectedPlan ? activeSolution?.metrics : null;
+  const cloudRunning = cloudState?.status === "queued" || cloudState?.status === "running";
+  const sceneOverlay = useMemo(() => draftSolution && overlayDraw
+    ? { ...overlayDraw, legs: [], violations: [], crossings: [], overlaps: [], bends: [] }
+    : isBackend ? overlayDraw : null, [draftSolution, overlayDraw, isBackend]);
+  const panelSolution = cloudRunning ? null : activeSolution;
+  const metrics = hasSelectedPlan ? panelSolution?.metrics : null;
+  const scoreWeights = cloudState?.events.find((event) => event.weights)?.weights;
   const scoredMetrics = isBackend && !overlayDraw?.metrics ? null : metrics;
-  const ruleChecks = hasSelectedPlan ? activeSolution?.checks ?? [] : [];
+  const ruleChecks = hasSelectedPlan ? panelSolution?.checks ?? [] : [];
   const knownChecks = ruleChecks.filter((check) => !check.na);
   const feasible = knownChecks.length > 0 && knownChecks.every((check) => check.pass);
   const hasFailures = knownChecks.some((check) => !check.pass);
   const minimumProof = isBackend && overlayDraw?.provenMinimum === true;
   const displayedStages = isBackend ? backendStages : solverStages;
-  const cloudRunning = cloudState?.status === "queued" || cloudState?.status === "running";
   const scaleSource = rawPlan.m_per_unit != null || rawPlan.metres_per_unit != null || rawPlan.meters_per_unit != null
     ? "declared metres per unit"
     : rawPlan.scale != null || rawPlan.units_per_metre != null
@@ -363,6 +540,10 @@ export default function App() {
   const badgeLabel =
     cloudRunning
       ? `AWS ${cloudState?.status.toUpperCase()}`
+      : draftStatus === "checking" ? "CHECKING EDIT"
+      : draftStatus === "valid" ? "EDIT CHECKED"
+      : draftStatus === "invalid" ? "EDIT VIOLATIONS"
+      : draftStatus === "preview" ? "EDIT PREVIEW"
       : cloudState?.status === "failed"
         ? "AWS ERROR"
         : cloudState?.status === "succeeded"
@@ -380,7 +561,7 @@ export default function App() {
           : "IDLE";
 
   return (
-    <div className={`app-shell${panelCollapsed ? " panel-collapsed" : ""}${modelView ? " model-view" : ""}`}>
+    <div className={`app-shell${panelCollapsed ? " panel-collapsed" : ""}${modelView ? " model-view" : ""}${comparisonOpen ? " comparing" : ""}${morphing ? " morphing" : ""}`} style={{ "--compare-position": `${comparePosition}%` } as CSSProperties}>
       <header className="topbar">
         <div className="brand-lockup">
           <span className="brand-mark"><span /></span>
@@ -394,6 +575,7 @@ export default function App() {
           ))}
         </div>
         <div className="topbar-actions">
+          <button type="button" className="ghost-action share-action" onClick={() => void shareResult()} disabled={!planKey || !activeSolution} title="Copy a link to this result"><Share2 size={14} /> <span>SHARE RESULT</span></button>
           <input
             ref={fileInput}
             type="file"
@@ -410,16 +592,33 @@ export default function App() {
           </button>
         </div>
       </header>
+      {shareStatus && <div className="share-popover" role="status"><span>{shareStatus}</span><button type="button" aria-label="Close share message" onClick={() => { setShareStatus(""); setShareUrl(""); }}><X size={13} /></button>{shareUrl && <input type="text" readOnly value={shareUrl} aria-label="Share result link" onFocus={(event) => event.target.select()} />}</div>}
 
       <main id="story" className="story">
         <div className="scene-sticky">
+          {comparisonOpen && plan && baselineSolution && (
+            <div className="comparison-layer baseline-layer">
+              <TwinScene
+                plan={plan} solution={baselineSolution} overlay={null}
+                showZones={showZones} showRoutes={showRoutes} wallHeight={wallSlice / 2.2}
+                zoomLevel={zoomLevel} optimizeSignal={optimizeSignal} preset={preset}
+                focusHub={null} modelShift={0} modelView={modelView}
+                showHeatmap={showHeatmap} verified={true}
+                onInspect={ignoreInspection} onPhaseChange={ignorePhase} onScrollView={ignoreScrollView}
+              />
+            </div>
+          )}
+          <div className="comparison-layer optimized-layer">
           {plan && activeSolution ? (
             <TwinScene
               plan={plan}
               solution={activeSolution}
-              overlay={isBackend ? overlayDraw : null}
+              overlay={sceneOverlay}
               showZones={showZones}
               showRoutes={showRoutes}
+              showHeatmap={showHeatmap}
+              verified={draftSolution ? draftStatus === "valid" : isBackend && overlayDraw?.valid === true}
+              onHubMove={hasSelectedPlan && !cloudRunning && !comparisonOpen ? handleHubMove : undefined}
               wallHeight={wallSlice / 2.2}
               zoomLevel={zoomLevel}
               optimizeSignal={optimizeSignal}
@@ -437,6 +636,10 @@ export default function App() {
               <span>{planError ?? "No valid plan loaded"}</span>
             </div>
           )}
+          </div>
+          {comparisonOpen && baselineSolution && activeSolution && (
+            <div className="comparison-divider" aria-hidden="true"><span>F0</span><span>OPTIMIZED</span></div>
+          )}
           <div className="scene-vignette" />
           <div className="cad-frame" aria-hidden="true">
             <span className="corner corner-tl" />
@@ -448,6 +651,7 @@ export default function App() {
             <span>SCALE {plan ? plan.unitsPerM.toFixed(2) : "—"} UNITS/M</span>
             <span>SECTION CUT {wallSlice.toFixed(2)} M</span>
           </div>
+          {showHeatmap && <div className="heatmap-legend" aria-label="Cable density colors"><span>LOW DENSITY</span><i /><span>HIGH DENSITY</span></div>}
         </div>
 
         <section className="story-panel intro-panel">
@@ -589,7 +793,7 @@ export default function App() {
             <h2>Ranked on hubs first,<br />then on cost J.</h2>
             <p>
               {scoredMetrics
-                ? `${scoredMetrics.L.toFixed(2)} m of cable + 5 × ${scoredMetrics.X} crossings + ${scoredMetrics.O.toFixed(2)} m overlap + 0.5 × ${scoredMetrics.B} bends = J ${scoredMetrics.J.toFixed(2)}. ` +
+                ? `${scoredMetrics.L.toFixed(2)} m of cable × ${scoreWeights?.L ?? 1} + ${scoredMetrics.X} crossings × ${scoreWeights?.X ?? 5} + ${scoredMetrics.O.toFixed(2)} m overlap × ${scoreWeights?.O ?? 1} + ${scoredMetrics.B} bends × ${scoreWeights?.B ?? 0.5} = J ${scoredMetrics.J.toFixed(2)}. ` +
                   `Area gap: ${scoredMetrics.areaGap.toFixed(1)} m². ${isBackend && overlayDraw?.checks.length ? `${overlayDraw.checks.filter((check) => check.pass).length}/${overlayDraw.checks.length} backend checks pass.` : "Browser checks are a preview; load the backend overlay for its independent checker results."}`
                 : isBackend ? "Load this result's overlay JSON to see the checker score breakdown." : "Load a plan to see the measured score."}
             </p>
@@ -655,6 +859,17 @@ export default function App() {
         </button>
       </nav>
 
+      {comparisonOpen && baselineSolution && activeSolution && (
+        <div className="comparison-controls" aria-label="F0 and optimized comparison">
+          <div><strong>F0 {baselineSolution.metrics.J.toFixed(2)}</strong><span>→</span><strong>OPTIMIZED {activeSolution.metrics.J.toFixed(2)}</strong></div>
+          <p>{baselineSolution.metrics.J > activeSolution.metrics.J
+            ? `${(baselineSolution.metrics.J - activeSolution.metrics.J).toFixed(2)} lower J · ${((baselineSolution.metrics.J - activeSolution.metrics.J) / baselineSolution.metrics.J * 100).toFixed(1)}% improvement`
+            : "The best verified design matches the F0 score."}</p>
+          <div className="comparison-range"><span>F0</span><input type="range" min="5" max="95" value={comparePosition} aria-label="Reveal baseline or optimized model" onChange={(event) => { setMorphing(false); setComparePosition(Number(event.target.value)); }} /><span>RESULT</span></div>
+          <button type="button" onClick={animateMorph}><Play size={12} /> PLAY TRANSITION</button>
+        </div>
+      )}
+
       {panelCollapsed && (
         <button type="button" className="panel-reopen" onClick={() => setPanelCollapsed(false)} aria-label="Show rules and score panel" aria-controls="rules-score-panel" aria-expanded={false}>
           <ChevronsLeft size={16} /> <span>RULES &amp; SCORE</span> <strong>J {scoredMetrics ? scoredMetrics.J.toFixed(1) : "—"}</strong>
@@ -668,9 +883,9 @@ export default function App() {
           <div className="panel-head-actions">
             {hasSelectedPlan && <span
               className={
-                runState === "solving"
+                runState === "solving" || draftStatus === "checking"
                   ? "validation-badge solving"
-                  : hasFailures || cloudState?.status === "failed"
+                  : hasFailures || draftStatus === "invalid" || cloudState?.status === "failed"
                     ? "validation-badge fail"
                     : feasible || isBackend
                       ? "validation-badge"
@@ -694,25 +909,31 @@ export default function App() {
         <div className="source-line">
           {cloudRunning
             ? `AWS solver ${cloudState?.status} · ${cloudState?.events.at(-1)?.message ?? "waiting for progress"}`
+            : draftStatus === "checking" ? "Hub moved · routing updated · independent checker running"
+            : draftStatus === "valid" ? "Edited candidate · independent checker passed"
+            : draftStatus === "invalid" ? "Edited candidate · independent checker found violations"
+            : draftStatus === "preview" ? "Edited candidate · browser preview checks only"
             : cloudState?.status === "failed"
               ? `AWS solver error · ${cloudState.error}`
               : isBackend
                 ? (overlayDraw?.metrics ? "Score and checks from the backend overlay" : "Load the matching overlay for the full score and checks")
                 : "Browser estimate · load an overlay for independent checks"}
         </div>
+        {draftMessage && <p className={draftStatus === "invalid" ? "edit-feedback invalid" : "edit-feedback"} role="status">{draftMessage}</p>}
 
+        {cloudRunning ? <div className="solver-skeleton" role="status" aria-label="Solver working"><i /><i /><div><i /><i /><i /><i /></div><i /></div> :
         <div className="cost-card">
           <div className="cost-formula">
             <span>SCORE</span>
-            <em>J = L + 5X + O + 0.5B</em>
+            <em>J = {scoreWeights?.L ?? 1}L + {scoreWeights?.X ?? 5}X + {scoreWeights?.O ?? 1}O + {scoreWeights?.B ?? 0.5}B</em>
           </div>
           <strong>{scoredMetrics ? scoredMetrics.J.toFixed(2) : "—"}</strong>
           <div className="cost-grid">
             {[
               { k: "L", v: metrics ? `${metrics.L.toFixed(2)} m` : "—", n: "cable length" },
-              { k: "X", v: scoredMetrics ? `${scoredMetrics.X}` : "—", n: "crossings · 5 each" },
+              { k: "X", v: scoredMetrics ? `${scoredMetrics.X}` : "—", n: `crossings · ${scoreWeights?.X ?? 5} each` },
               { k: "O", v: scoredMetrics ? `${scoredMetrics.O.toFixed(2)} m` : "—", n: "shared cable length" },
-              { k: "B", v: scoredMetrics ? `${scoredMetrics.B}` : "—", n: "bends · 0.5 each" },
+              { k: "B", v: scoredMetrics ? `${scoredMetrics.B}` : "—", n: `bends · ${scoreWeights?.B ?? 0.5} each` },
             ].map((item) => (
               <div key={item.k} className="cost-cell">
                 <span>{item.k}</span>
@@ -722,10 +943,12 @@ export default function App() {
             ))}
           </div>
           <div className="cost-extra">
-            <span>HUBS <strong>{activeSolution?.hubs.length ?? 0}</strong> / LOWER BOUND <strong>{metrics?.hubLowerBound ?? 0}</strong></span>
+            <span>HUBS <strong>{panelSolution?.hubs.length ?? "—"}</strong> / LOWER BOUND <strong>{metrics?.hubLowerBound ?? "—"}</strong></span>
             <span>AREA GAP MAX−MIN <strong>{scoredMetrics ? `${scoredMetrics.areaGap.toFixed(1)} m²` : "—"}</strong></span>
           </div>
-        </div>
+        </div>}
+
+        {cloudState && <CostHistory events={cloudState.events} />}
 
         <details className="solver-status">
           <summary className="solver-status-head">
@@ -741,7 +964,7 @@ export default function App() {
 
         <div className="checks">
           <h3 className="panel-section-title">RULE CHECKS <span>{knownChecks.filter((check) => check.pass).length}/{knownChecks.length} PASS</span></h3>
-          {(activeSolution?.checks ?? []).map((check) => (
+          {ruleChecks.map((check) => (
             <div key={check.id} className={check.na ? "check-row na" : check.pass ? "check-row pass" : "check-row fail"}>
               {check.na ? <Minus size={14} /> : check.pass ? <Check size={14} /> : <X size={14} />}
               <div><span>{check.label}</span><small>{check.detail}</small></div>
@@ -752,7 +975,7 @@ export default function App() {
 
         <div className="load-section">
           <div className="load-head"><span>HUB LOAD / AREA</span><span>MAX 5 NODES · 100 M²</span></div>
-          {(activeSolution?.hubs ?? []).map((hub, index) => (
+          {(panelSolution?.hubs ?? []).map((hub, index) => (
             <div key={hub.hub_id} className="load-row" style={{ ["--lane" as string]: hub.color }}>
               <span>{hub.hub_id}</span>
               <i>
@@ -803,11 +1026,10 @@ export default function App() {
           <h3>{selected.title}</h3>
           <p>{selected.detail}</p>
           <p className="inspector-coords">{selected.coords}</p>
-          <div><span>{selected.zone}</span><strong>{isBackend && overlayDraw?.valid === true ? "CHECKED" : "PREVIEW"}</strong></div>
+          <div><span>{selected.zone}</span><strong>{draftStatus === "invalid" ? "VIOLATIONS" : draftStatus === "checking" ? "CHECKING" : draftStatus === "valid" || (!draftSolution && isBackend && overlayDraw?.valid === true) ? "CHECKED" : "PREVIEW"}</strong></div>
         </aside>
       )}
-
-      <div className="view-toolbar" aria-label="Model visibility controls">
+      <div className="view-toolbar" role="toolbar" aria-label="Model controls">
         <button
           type="button"
           className={modelView ? "model-view-toggle active" : "model-view-toggle"}
@@ -815,6 +1037,7 @@ export default function App() {
           aria-label={modelView ? "Exit model view" : "Enter model view"}
           title={modelView ? "Exit model view" : "Model view"}
           onClick={() => {
+            if (toolbarMenuRef.current) toolbarMenuRef.current.open = false;
             setModelView((value) => !value);
             setSelected(null);
             setDrawerOpen(false);
@@ -829,11 +1052,8 @@ export default function App() {
         <button type="button" className={showRoutes ? "active" : ""} aria-label="Toggle conduits" title="Toggle conduits" aria-pressed={showRoutes} onClick={() => setShowRoutes((value) => !value)}>
           <Route size={16} /><span>CONDUITS</span>
         </button>
-        <button type="button" className={drawerOpen ? "toolbar-output active" : "toolbar-output"} aria-label="Open output JSON" title="Open output JSON" aria-pressed={drawerOpen} onClick={() => setDrawerOpen((value) => !value)}>
-          <Braces size={16} /><span>OUTPUT JSON</span>
-        </button>
-        <button type="button" className="toolbar-reset-pick" aria-label="Clear selection" title="Clear selection" onClick={() => setSelected(null)}>
-          <ScanLine size={16} /><span>RESET PICK</span>
+        <button type="button" className={showHeatmap ? "active" : ""} aria-label="Toggle cable density heatmap" title="Cable density heatmap" aria-pressed={showHeatmap} onClick={() => setShowHeatmap((value) => !value)}>
+          <Activity size={16} /><span>HEATMAP</span>
         </button>
         <div className="toolbar-zoom" aria-label="Model zoom">
           <ZoomOut size={13} aria-hidden="true" />
@@ -850,6 +1070,16 @@ export default function App() {
           />
           <ZoomIn size={13} aria-hidden="true" />
         </div>
+        <details className="toolbar-more" ref={toolbarMenuRef}>
+          <summary aria-label="More model actions" title="More model actions"><MoreHorizontal size={17} /><span>MORE</span></summary>
+          <div className="toolbar-menu" onClick={() => { if (toolbarMenuRef.current) toolbarMenuRef.current.open = false; }}>
+            {baselineSolution && <button type="button" onClick={() => { setComparisonOpen((value) => !value); setComparePosition(50); }}><GitCompareArrows size={15} /><span>{comparisonOpen ? "Exit comparison" : "Compare with F0"}</span></button>}
+            {draftSolution && <button type="button" onClick={() => { draftControllerRef.current?.abort(); setDraftSolution(null); setDraftStatus(null); setDraftMessage(""); }}><RotateCcw size={15} /><span>Reset hub edit</span></button>}
+            {hasSelectedPlan && activeSolution && <button type="button" onClick={() => window.print()} disabled={isBackend && !overlayDraw?.metrics} title={isBackend && !overlayDraw?.metrics ? "Load the matching checker overlay for a complete report" : "Export PDF report"}><FileDown size={15} /><span>PDF report</span></button>}
+            <button type="button" onClick={() => setDrawerOpen((value) => !value)}><Braces size={15} /><span>{drawerOpen ? "Close output JSON" : "View output JSON"}</span></button>
+            {selected && <button type="button" onClick={() => setSelected(null)}><ScanLine size={15} /><span>Clear selection</span></button>}
+          </div>
+        </details>
       </div>
 
       <div className="mobile-status">
@@ -900,6 +1130,7 @@ export default function App() {
         </details>
         <pre><code>{jsonText}</code></pre>
       </section>
+      {hasSelectedPlan && plan && activeSolution && (!isBackend || overlayDraw?.metrics) && <SolutionReport plan={plan} solution={activeSolution} baseline={baselineSolution} source={draftStatus === "invalid" ? "Edited candidate with rule violations" : draftStatus === "valid" ? "Checker-validated hub edit" : draftSolution ? "Edited browser preview" : isBackend ? "Backend checked result" : "Browser preview"} weights={scoreWeights} />}
     </div>
   );
 }

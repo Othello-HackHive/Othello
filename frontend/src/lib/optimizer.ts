@@ -510,7 +510,9 @@ export interface SolveStats {
   total_length_m: number;
 }
 
-export function optimize(plan: PlanModel, hubOverride?: number): Solution {
+export type HubEdit = { base: Solution; hubId: string; position: Vec2 };
+
+export function optimize(plan: PlanModel, hubOverride?: number, edit?: HubEdit): Solution {
   const nodes = plan.eligibleRooms;
   const nodeIdOf = new Map(nodes.map((room, index) => [room.id, `N${index + 1}`]));
   const lowerBound = Math.max(
@@ -518,11 +520,13 @@ export function optimize(plan: PlanModel, hubOverride?: number): Solution {
     Math.ceil(nodes.length / 5),
     1,
   );
-  let hubCount = Math.max(lowerBound, hubOverride ?? 0);
-  let districts: District[] | null = null;
+  let hubCount = edit ? edit.base.hubs.length : Math.max(lowerBound, hubOverride ?? 0);
+  let districts: District[] | null = edit ? edit.base.hubs.map((hub) => ({
+    seed: hub.room_id, rooms: [...hub.assigned_rooms], area: hub.area_m2, nodes: hub.assigned_nodes.length,
+  })) : null;
   let iterations = 0;
 
-  while (hubCount <= nodes.length) {
+  while (!edit && hubCount <= nodes.length) {
     iterations += 1;
     districts = districting(plan, hubCount);
     if (districts) break;
@@ -539,20 +543,41 @@ export function optimize(plan: PlanModel, hubOverride?: number): Solution {
 
   districts.forEach((district, index) => {
     const districtRooms = district.rooms.map((id) => roomById(plan, id));
+    const previousHub = edit?.base.hubs[index];
+    if (previousHub && previousHub.hub_id !== edit.hubId) {
+      districtRooms.forEach((room) => { room.hubId = previousHub.hub_id; });
+      hubs.push({ ...previousHub, route_segments: previousHub.route_segments.map((segment) => ({ ...segment, polyline: segment.polyline.map((point) => [...point] as Vec2) })) });
+      anchors.push(previousHub.location, ...districtRooms.map((room) => room.node));
+      return;
+    }
     /* hub point = most shielded room, offset from the fixed node so the ring has a real tie-in run */
-    const hostRoom = [...districtRooms].sort((a, b) => b.clearance - a.clearance)[0];
-    const hubPoint = placeHub(hostRoom, hostRoom.node);
+    const hostRoom = edit
+      ? districtRooms.find((room) => pointInPolygon(edit.position, room.polygon)) ?? roomById(plan, district.seed)
+      : [...districtRooms].sort((a, b) => b.clearance - a.clearance)[0];
+    const hubPoint = edit ? edit.position : placeHub(hostRoom, hostRoom.node);
     districtRooms.forEach((room) => {
       room.hubId = `H${index + 1}`;
     });
     anchors.push(hubPoint);
 
-    const order = ringOrder(hubPoint, districtRooms.map((room) => ({ id: room.id, p: room.node })));
-    const stopFor = (item: { id: string; p: Vec2 }) => ({ id: nodeIdOf.get(item.id) ?? item.id, p: item.p, room: item.id });
+    const order: Array<{ id: string; p: Vec2; nodeId?: string }> = edit && previousHub
+      ? previousHub.closed_sequence.slice(1, -1).map((id) => {
+        const indexFromId = /^N\d+$/i.test(id) ? Number(id.slice(1)) - 1 : -1;
+        const p = previousHub.nodePoints[id] ?? plan.eligibleRooms[indexFromId]?.node;
+        const indexedRoom = plan.eligibleRooms[indexFromId];
+        const room = districtRooms.find((candidate) => p && pointInPolygon(p, candidate.polygon))
+          ?? districtRooms.find((candidate) => candidate.id === indexedRoom?.id)
+          ?? (p ? [...districtRooms].sort((a, b) => Math.hypot(a.node[0] - p[0], a.node[1] - p[1])
+            - Math.hypot(b.node[0] - p[0], b.node[1] - p[1]))[0] : undefined);
+        if (!p || !room) throw new Error(`Cannot identify the assigned room for node ${id}`);
+        return { id: room.id, nodeId: id, p };
+      })
+      : ringOrder(hubPoint, districtRooms.map((room) => ({ id: room.id, p: room.node })));
+    const stopFor = (item: { id: string; p: Vec2; nodeId?: string }) => ({ id: item.nodeId ?? nodeIdOf.get(item.id) ?? item.id, p: item.p, room: item.id });
     const stops = [{ id: `H${index + 1}`, p: hubPoint, room: hostRoom.id }, ...order.map(stopFor)];
     const nodePoints: Record<string, Vec2> = {};
     order.forEach((item) => {
-      nodePoints[nodeIdOf.get(item.id) ?? item.id] = item.p;
+      nodePoints[item.nodeId ?? nodeIdOf.get(item.id) ?? item.id] = item.p;
     });
 
     const route_segments: RouteSegment[] = [];
@@ -578,8 +603,8 @@ export function optimize(plan: PlanModel, hubOverride?: number): Solution {
       room_id: hostRoom.id,
       location: [Number(hubPoint[0].toFixed(3)), Number(hubPoint[1].toFixed(3))],
       assigned_rooms: district.rooms,
-      assigned_nodes: order.map((item) => nodeIdOf.get(item.id) ?? item.id),
-      closed_sequence: [`H${index + 1}`, ...order.map((item) => nodeIdOf.get(item.id) ?? item.id), `H${index + 1}`],
+      assigned_nodes: order.map((item) => item.nodeId ?? nodeIdOf.get(item.id) ?? item.id),
+      closed_sequence: [`H${index + 1}`, ...order.map((item) => item.nodeId ?? nodeIdOf.get(item.id) ?? item.id), `H${index + 1}`],
       route_segments,
       ring_length_m: Number(route_segments.reduce((acc, seg) => acc + seg.length_m, 0).toFixed(3)),
       area_m2: Number(district.area.toFixed(2)),
@@ -589,7 +614,7 @@ export function optimize(plan: PlanModel, hubOverride?: number): Solution {
     districtRooms.forEach((room) => anchors.push(room.node));
   });
 
-  resolveOverlaps(hubs, plan);
+  if (!edit) resolveOverlaps(hubs, plan);
   hubs.forEach((hub, ring) => {
     hub.route_segments.forEach((segment, segmentIndex) => {
       for (let i = 1; i < segment.polyline.length; i += 1) {

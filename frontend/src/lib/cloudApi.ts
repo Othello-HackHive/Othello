@@ -9,12 +9,22 @@ export type CloudEvent = {
   stage: string;
   message: string;
   elapsed_s?: number;
+  candidate_kind?: "baseline" | "incumbent";
+  metrics?: { L: number; X: number; O: number; B: number; J: number };
+  weights?: { L: number; X: number; O: number; B: number };
 };
 
 export type CloudProgress = {
   jobId: string;
   status: string;
   events: CloudEvent[];
+};
+
+export type CandidateValidation = {
+  valid: boolean;
+  metrics: { L: number; X: number; O: number; B: number; J: number; area_gap_m2: number } | null;
+  checks: Array<{ rule_id: string; label: string; passed: boolean; value: string; detail: string }>;
+  violations: Array<{ type: string; detail: string; hub_id?: string | null }>;
 };
 
 type JobReply = {
@@ -81,12 +91,24 @@ export function isCloudPlan(plan: Record<string, unknown>): boolean {
   );
 }
 
+export async function validateCloudEdit(jobId: string, output: Record<string, unknown>, signal: AbortSignal): Promise<CandidateValidation> {
+  const candidate = { ...output, reported_metrics: {
+    hub_count: (output.hubs as unknown[]).length,
+    total_length_m: (output.reported_metrics as { total_length_m?: number })?.total_length_m ?? 0,
+  } };
+  return getJson<CandidateValidation>(`/api/jobs/${jobId}/validate`, signal, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(candidate),
+  });
+}
+
 export async function solveCloudPlan(
   plan: Record<string, unknown>,
   settings: Record<string, unknown> | null,
   signal: AbortSignal,
   onProgress: (progress: CloudProgress) => void,
-): Promise<{ official: Record<string, unknown>; officialText: string; overlay: Record<string, unknown>; jobId: string }> {
+): Promise<{ official: Record<string, unknown>; officialText: string; overlay: Record<string, unknown>; baseline: Record<string, unknown> | null; jobId: string }> {
   if (!cloudAvailable) throw new Error("Set VITE_OTHELLO_API_URL before building the website.");
   const payload = settings ? { plan, settings } : plan;
   const started = await getJson<JobReply>("/api/jobs", signal, {
@@ -125,11 +147,12 @@ export async function solveCloudPlan(
     if (!job.files?.official || !job.files?.overlay) {
       throw new Error("The solver finished without its official and overlay result files.");
     }
-    const [official, overlay] = await Promise.all([
+    const [official, overlay, baseline] = await Promise.all([
       getJson<Record<string, unknown>>(`/api/jobs/${jobId}/result/official`, signal),
       getJson<Record<string, unknown>>(`/api/jobs/${jobId}/result/overlay`, signal),
+      job.files?.baseline ? getJson<Record<string, unknown>>(`/api/jobs/${jobId}/result/baseline`, signal) : Promise.resolve(null),
     ]);
-    return { official, officialText: JSON.stringify(official, null, 2), overlay, jobId };
+    return { official, officialText: JSON.stringify(official, null, 2), overlay, baseline, jobId };
   } finally {
     signal.removeEventListener("abort", cancel);
   }
