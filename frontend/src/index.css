@@ -301,7 +301,7 @@ button {
   .report-header p { margin: 0; color: #d63832; font-weight: bold; letter-spacing: .08em; }
   .report-header h1 { margin: 3px 0; font-size: 25pt; }
   .report-header strong { font-size: 22pt; }
-  .report-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; margin: 14px 0; }
+  .report-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin: 14px 0; }
   .report-summary div { padding: 9px; background: #edf3f6; }
   .report-summary span, .report-summary strong { display: block; }
   .report-summary span { font-size: 7pt; color: #526672; }
