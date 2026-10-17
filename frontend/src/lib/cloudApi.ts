@@ -103,6 +103,18 @@ export async function validateCloudEdit(jobId: string, output: Record<string, un
   });
 }
 
+export async function rerouteCloudHub(jobId: string, hubId: string, output: Record<string, unknown>, signal: AbortSignal): Promise<{ official: Record<string, unknown>; validation: CandidateValidation }> {
+  const candidate = { ...output, reported_metrics: {
+    hub_count: (output.hubs as unknown[]).length,
+    total_length_m: (output.reported_metrics as { total_length_m?: number })?.total_length_m ?? 0,
+  } };
+  return getJson(`/api/jobs/${jobId}/reroute`, signal, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ hub_id: hubId, candidate }),
+  });
+}
+
 export async function solveCloudPlan(
   plan: Record<string, unknown>,
   settings: Record<string, unknown> | null,

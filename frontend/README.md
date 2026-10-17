@@ -7,8 +7,8 @@ Interactive floor plan viewer for hub placement and closed-ring cable routing. U
 - **ResPlan & Overlay Parsing (`resplan.ts`)**: Loads official schema JSON and overlay representations with door connections, zone partitions, and violations.
 - **Routing & Optimization Engine (`optimizer.ts`)**: Browser preview heuristic and estimated metrics. The backend overlay supplies independent rule checks and score data.
 - **BIM Inspector & Audit Deck**: Real-time penalty breakdown, loop continuity verification, and node status indicators.
-- **F0 comparison and cost history**: AWS jobs show the first verified F0 design beside the final result when a baseline is available. The sidebar plots measured candidate scores as they arrive.
-- **Hub editing**: Drag a hub inside its assigned rooms to reroute that ring and update the score. For a completed AWS job, the edited candidate is also sent to the independent checker; the original result remains available with **Reset Edit**. Browser examples show a preview score and preview checks.
+- **Cost history**: The sidebar plots measured candidate scores as they arrive from AWS.
+- **Hub editing**: Drag a hub inside its assigned room. For a completed AWS job, the API reroutes that hub's ring at its new location and checks the result; the original result remains available with **Reset hub edit**. Browser examples show a local preview score and checks.
 - **Cable density heatmap**: Toggle **Heatmap** in the viewer toolbar to see how many route segments occupy each floor cell. Blue marks lower density and red marks higher density.
 - **Viewer controls**: Use **Model View** for an unobstructed canvas and watch progress placeholders while an AWS job runs. Checked hubs show subtle particles.
 - **Share Result**: Copies a link that restores the plan, result, edits, and view settings in another browser. The data is stored in the URL fragment, so anyone with the link can read it; very large plans may exceed the link size limit.
@@ -60,7 +60,7 @@ When the API URL is set, uploading a ResPlan JSON with GeoJSON or WKT geometry s
 
 If the API stack uses `ApiKey`, `VITE_OTHELLO_API_KEY` sends it as `x-api-key`. A Vite variable is embedded in public browser JavaScript, so this key must not be treated as secret authentication. See [`docs/DEPLOYMENT.md`](../docs/DEPLOYMENT.md) for the backend deployment and CORS setup.
 
-## Test Before vs After locally
+## Test AWS hub rerouting locally
 
 Run the API in one PowerShell terminal from the repository root:
 
@@ -76,4 +76,4 @@ cd frontend
 npm run dev
 ```
 
-Open the Vite URL (normally `http://localhost:5173`) and upload `tests/data/uploads/three_rooms.json`. Once the job succeeds, choose **More → Compare with F0** in the bottom toolbar. Drag the comparison slider to reveal either design, then select **Play Transition** for the animated reveal. This sample produced a verified F0 score around 42.28 and an optimized score around 30.05 in a local run; exact results can vary with the solver budget. The built-in example buttons use browser previews and do not supply the AWS baseline file. If Compare is disabled, the More menu now explains whether the AWS result or its F0 baseline is missing. On a deployed site, confirm that the GitHub **Deploy** workflow has updated the AWS worker as well as the frontend deployment.
+Open the Vite URL (normally `http://localhost:5173`) and upload `tests/data/uploads/three_rooms.json`. Once the job succeeds, drag a hub to another legal point in its room. The score panel should show **AWS REROUTING**, then **EDIT CHECKED** with the new measured score. Use **More → Reset hub edit** to restore the original result. If AWS cannot find a valid route at that point, the panel keeps the browser preview and shows the API error. The built-in example buttons are browser previews and cannot reroute on AWS. On a deployed site, deploy the updated AWS API image as well as the frontend; an old API returns 404 for `/api/jobs/{id}/reroute`.

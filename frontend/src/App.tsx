@@ -30,7 +30,6 @@ import {
   ZoomIn,
   ZoomOut,
   FileDown,
-  GitCompareArrows,
   Share2,
   Activity,
   MoreHorizontal,
@@ -38,10 +37,10 @@ import {
 import TwinScene, { type CameraPresetId, type Inspection } from "./components/TwinScene";
 import CostHistory from "./components/CostHistory";
 import SolutionReport from "./components/SolutionReport";
-import { normalizePlan, PRESET_IDS, PRESET_JSON, type PlanModel } from "./lib/resplan";
+import { normalizePlan, pointInPolygon, PRESET_IDS, PRESET_JSON, type PlanModel } from "./lib/resplan";
 import { optimize, type Solution } from "./lib/optimizer";
 import { parseOverlay, solutionFromOfficial, type OverlayDraw } from "./lib/overlay";
-import { cloudAvailable, isCloudPlan, solveCloudPlan, validateCloudEdit, type CloudEvent } from "./lib/cloudApi";
+import { cloudAvailable, isCloudPlan, rerouteCloudHub, solveCloudPlan, type CloudEvent } from "./lib/cloudApi";
 import { viewerPlanFromCloud } from "./lib/cloudPlan";
 import { createShareLink, readShareLink, type SharedView } from "./lib/shareLink";
 
@@ -467,46 +466,65 @@ export default function App() {
   const handleHubMove = useCallback((hubId: string, position: [number, number]) => {
     if (!plan || !activeSolution) return;
     draftControllerRef.current?.abort();
+    const jobId = cloudState?.status === "succeeded" ? cloudState.jobId : undefined;
+    let candidate: Record<string, unknown>;
     try {
       const edited = optimize(plan, undefined, { base: activeSolution, hubId, position });
       setDraftSolution(edited);
+      candidate = edited.output;
       setDraftMessage("");
       setSelected(null);
-      const jobId = cloudState?.status === "succeeded" ? cloudState.jobId : undefined;
+    } catch (error) {
       if (!jobId || !resultSolution) {
-        setDraftStatus("preview");
+        setDraftMessage(error instanceof Error ? error.message : "Could not reroute this hub");
         return;
       }
-      const controller = new AbortController();
-      draftControllerRef.current = controller;
-      setDraftStatus("checking");
-      void validateCloudEdit(jobId, edited.output, controller.signal).then((validation) => {
-        if (controller.signal.aborted) return;
-        setDraftSolution({
-          ...edited,
-          source: "backend",
-          metrics: validation.metrics ? {
-            ...edited.metrics, L: validation.metrics.L, X: validation.metrics.X,
-            O: validation.metrics.O, B: validation.metrics.B, J: validation.metrics.J,
-            areaGap: validation.metrics.area_gap_m2,
-          } : edited.metrics,
-          checks: validation.checks.map((check) => ({
-            id: check.rule_id, label: check.label, pass: check.passed,
-            value: check.value, detail: check.detail,
-          })),
-        });
-        setDraftStatus(validation.valid ? "valid" : "invalid");
-        setDraftMessage(validation.valid ? "Edited route passed the independent checker." :
-          validation.violations.slice(0, 2).map((item) => `${item.type}: ${item.detail}`).join(" · ") || "Edited route failed the independent checker.");
-      }).catch((error) => {
-        if (controller.signal.aborted) return;
-        setDraftStatus("preview");
-        setDraftMessage(error instanceof Error ? error.message : "Could not check the edited route");
-      });
-    } catch (error) {
-      setDraftMessage(error instanceof Error ? error.message : "Could not reroute this hub");
+      const host = activeSolution.hubs.find((hub) => hub.hub_id === hubId);
+      const room = plan.rooms.find((item) => host?.assigned_rooms.includes(item.id) && pointInPolygon(position, item.polygon));
+      if (!room) {
+        setDraftMessage("The moved hub is outside its assigned rooms.");
+        return;
+      }
+      candidate = structuredClone(activeSolution.output);
+      const hub = (candidate.hubs as Array<Record<string, unknown>>).find((item) => item.hub_id === hubId);
+      if (!hub) return;
+      hub.room_id = room.id;
+      hub.location = { x: position[0], y: position[1] };
+      setSelected(null);
     }
-  }, [plan, activeSolution, cloudState?.status, cloudState?.jobId, resultSolution]);
+    if (!jobId || !resultSolution) {
+      setDraftStatus("preview");
+      return;
+    }
+    const controller = new AbortController();
+    draftControllerRef.current = controller;
+    setDraftMessage("");
+    setDraftStatus("checking");
+    void rerouteCloudHub(jobId, hubId, candidate, controller.signal).then(({ official: rerouted, validation }) => {
+      if (controller.signal.aborted) return;
+      const solved = solutionFromOfficial(rerouted, JSON.stringify(rerouted, null, 2), plan, overlayDraw);
+      setDraftSolution({
+        ...solved,
+        source: "backend",
+        metrics: validation.metrics ? {
+          ...solved.metrics, L: validation.metrics.L, X: validation.metrics.X,
+          O: validation.metrics.O, B: validation.metrics.B, J: validation.metrics.J,
+          areaGap: validation.metrics.area_gap_m2,
+        } : solved.metrics,
+        checks: validation.checks.map((check) => ({
+          id: check.rule_id, label: check.label, pass: check.passed,
+          value: check.value, detail: check.detail,
+        })),
+      });
+      setDraftStatus(validation.valid ? "valid" : "invalid");
+      setDraftMessage(validation.valid ? "AWS rerouted this hub and verified the new score." :
+        validation.violations.slice(0, 2).map((item) => `${item.type}: ${item.detail}`).join(" · ") || "AWS reroute failed the independent checker.");
+    }).catch((error) => {
+      if (controller.signal.aborted) return;
+      setDraftStatus("preview");
+      setDraftMessage(error instanceof Error ? error.message : "Could not reroute this hub on AWS");
+    });
+  }, [plan, activeSolution, cloudState?.status, cloudState?.jobId, resultSolution, overlayDraw]);
 
   const animateMorph = () => {
     setMorphing(false);
@@ -520,13 +538,6 @@ export default function App() {
 
   const hasSelectedPlan = planKey !== "";
   const cloudRunning = cloudState?.status === "queued" || cloudState?.status === "running";
-  const compareUnavailableReason = !cloudAvailable
-    ? "AWS API was not configured when this site was built."
-    : cloudRunning ? "Wait for the AWS solve to finish."
-      : !resultSolution ? "Load a completed AWS result to compare."
-        : !baselineData ? "This job returned no verified F0 baseline. Check the AWS worker deployment."
-          : !baselineMetrics ? "F0 was returned without a verified score. Check the AWS API deployment."
-            : baselineView.error ?? "F0 could not be displayed.";
   const sceneOverlay = useMemo(() => draftSolution && overlayDraw
     ? { ...overlayDraw, legs: [], violations: [], crossings: [], overlaps: [], bends: [] }
     : isBackend ? overlayDraw : null, [draftSolution, overlayDraw, isBackend]);
@@ -554,7 +565,7 @@ export default function App() {
   const badgeLabel =
     cloudRunning
       ? `AWS ${cloudState?.status.toUpperCase()}`
-      : draftStatus === "checking" ? "CHECKING EDIT"
+      : draftStatus === "checking" ? "AWS REROUTING"
       : draftStatus === "valid" ? "EDIT CHECKED"
       : draftStatus === "invalid" ? "EDIT VIOLATIONS"
       : draftStatus === "preview" ? "EDIT PREVIEW"
@@ -923,8 +934,8 @@ export default function App() {
         <div className="source-line">
           {cloudRunning
             ? `AWS solver ${cloudState?.status} · ${cloudState?.events.at(-1)?.message ?? "waiting for progress"}`
-            : draftStatus === "checking" ? "Hub moved · routing updated · independent checker running"
-            : draftStatus === "valid" ? "Edited candidate · independent checker passed"
+            : draftStatus === "checking" ? "Hub moved · AWS rerouting and checking the ring"
+            : draftStatus === "valid" ? "Edited candidate · AWS reroute and checker passed"
             : draftStatus === "invalid" ? "Edited candidate · independent checker found violations"
             : draftStatus === "preview" ? "Edited candidate · browser preview checks only"
             : cloudState?.status === "failed"
@@ -1087,8 +1098,6 @@ export default function App() {
         <details className="toolbar-more" ref={toolbarMenuRef}>
           <summary aria-label="More model actions" title="More model actions"><MoreHorizontal size={17} /><span>MORE</span></summary>
           <div className="toolbar-menu" onClick={() => { if (toolbarMenuRef.current) toolbarMenuRef.current.open = false; }}>
-            {hasSelectedPlan && <button type="button" disabled={!baselineSolution} title={baselineSolution ? "Compare the verified F0 baseline with the optimized result" : compareUnavailableReason} onClick={() => { setComparisonOpen((value) => !value); setComparePosition(50); }}><GitCompareArrows size={15} /><span>{comparisonOpen ? "Exit comparison" : "Compare with F0"}</span></button>}
-            {hasSelectedPlan && !baselineSolution && <p className="toolbar-menu-note">{compareUnavailableReason}</p>}
             {draftSolution && <button type="button" onClick={() => { draftControllerRef.current?.abort(); setDraftSolution(null); setDraftStatus(null); setDraftMessage(""); }}><RotateCcw size={15} /><span>Reset hub edit</span></button>}
             {hasSelectedPlan && activeSolution && <button type="button" onClick={() => window.print()} disabled={isBackend && !overlayDraw?.metrics} title={isBackend && !overlayDraw?.metrics ? "Load the matching checker overlay for a complete report" : "Export PDF report"}><FileDown size={15} /><span>PDF report</span></button>}
             <button type="button" onClick={() => setDrawerOpen((value) => !value)}><Braces size={15} /><span>{drawerOpen ? "Close output JSON" : "View output JSON"}</span></button>
@@ -1145,7 +1154,7 @@ export default function App() {
         </details>
         <pre><code>{jsonText}</code></pre>
       </section>
-      {hasSelectedPlan && plan && activeSolution && (!isBackend || overlayDraw?.metrics) && <SolutionReport plan={plan} solution={activeSolution} baseline={baselineSolution} source={draftStatus === "invalid" ? "Edited candidate with rule violations" : draftStatus === "valid" ? "Checker-validated hub edit" : draftSolution ? "Edited browser preview" : isBackend ? "Backend checked result" : "Browser preview"} weights={scoreWeights} />}
+      {hasSelectedPlan && plan && activeSolution && (!isBackend || overlayDraw?.metrics) && <SolutionReport plan={plan} solution={activeSolution} source={draftStatus === "invalid" ? "Edited candidate with rule violations" : draftStatus === "valid" ? "AWS rerouted and checked hub edit" : draftSolution ? "Edited browser preview" : isBackend ? "Backend checked result" : "Browser preview"} weights={scoreWeights} />}
     </div>
   );
 }

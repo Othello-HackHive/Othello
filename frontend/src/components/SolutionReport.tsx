@@ -13,17 +13,16 @@ function PlanDrawing({ plan, solution }: { plan: PlanModel; solution: Solution }
   </svg>;
 }
 
-export default function SolutionReport({ plan, solution, baseline, source, weights }: {
+export default function SolutionReport({ plan, solution, source, weights }: {
   plan: PlanModel;
   solution: Solution;
-  baseline: Solution | null;
   source: string;
   weights?: CloudEvent["weights"];
 }) {
   const metrics = solution.metrics;
   return <article className="print-report">
     <header className="report-header"><div><p>NodeRithm / SOLUTION REPORT</p><h1>{plan.plan_id}</h1><span>{source}</span></div><strong>J {metrics.J.toFixed(2)}</strong></header>
-    <section className="report-summary"><div><span>HUBS</span><strong>{solution.hubs.length}</strong></div><div><span>CABLE</span><strong>{metrics.L.toFixed(2)} m</strong></div><div><span>CHECKS</span><strong>{solution.checks.filter((check) => !check.na && check.pass).length}/{solution.checks.filter((check) => !check.na).length}</strong></div><div><span>F0 → RESULT</span><strong>{baseline ? `${baseline.metrics.J.toFixed(2)} → ${metrics.J.toFixed(2)}` : "—"}</strong></div></section>
+    <section className="report-summary"><div><span>HUBS</span><strong>{solution.hubs.length}</strong></div><div><span>CABLE</span><strong>{metrics.L.toFixed(2)} m</strong></div><div><span>CHECKS</span><strong>{solution.checks.filter((check) => !check.na && check.pass).length}/{solution.checks.filter((check) => !check.na).length}</strong></div></section>
     <h2>Floor plan and route overlay</h2>
     <PlanDrawing plan={plan} solution={solution} />
     <div className="report-columns">
