@@ -166,15 +166,16 @@ export default function App() {
   const activeSolution = draftSolution ?? resultSolution ?? solution;
   const isBackend = draftSolution ? draftStatus === "valid" || draftStatus === "invalid" : resultSolution !== null;
   const baselineMetrics = cloudState?.events.find((event) => event.candidate_kind === "baseline")?.metrics;
-  const baselineSolution = useMemo<Solution | null>(() => {
-    if (!plan || !baselineData || !baselineMetrics || !resultSolution) return null;
+  const baselineView = useMemo<{ solution: Solution | null; error: string | null }>(() => {
+    if (!plan || !baselineData || !baselineMetrics || !resultSolution) return { solution: null, error: null };
     try {
       const result = solutionFromOfficial(baselineData, JSON.stringify(baselineData), plan, null);
-      return { ...result, metrics: { ...result.metrics, ...baselineMetrics } };
-    } catch {
-      return null;
+      return { solution: { ...result, metrics: { ...result.metrics, ...baselineMetrics } }, error: null };
+    } catch (error) {
+      return { solution: null, error: error instanceof Error ? error.message : "Could not read the F0 design" };
     }
   }, [plan, baselineData, baselineMetrics, resultSolution]);
+  const baselineSolution = baselineView.solution;
 
   const jsonText = useMemo(
     () => {
@@ -295,7 +296,13 @@ export default function App() {
       setBaselineData(result.baseline);
       setOfficial({ text: result.officialText, data: result.official, name: `${payload.key}.json` });
       setWarnings((current) => [...current, ...draw.warnings]);
-      setCloudState((current) => ({ status: "succeeded", jobId: result.jobId, events: current?.events ?? [] }));
+      setCloudState((current) => {
+        const events = current?.events ?? [];
+        const recovered = result.baselineMetrics && !events.some((event) => event.candidate_kind === "baseline")
+          ? [{ stage: "candidate", message: "Verified F0 baseline", candidate_kind: "baseline" as const, metrics: result.baselineMetrics }, ...events]
+          : events;
+        return { status: "succeeded", jobId: result.jobId, events: recovered };
+      });
       setRunState("verified");
       setOptimizeSignal((value) => value + 1);
       setPlanError(null);
@@ -513,6 +520,13 @@ export default function App() {
 
   const hasSelectedPlan = planKey !== "";
   const cloudRunning = cloudState?.status === "queued" || cloudState?.status === "running";
+  const compareUnavailableReason = !cloudAvailable
+    ? "AWS API was not configured when this site was built."
+    : cloudRunning ? "Wait for the AWS solve to finish."
+      : !resultSolution ? "Load a completed AWS result to compare."
+        : !baselineData ? "This job returned no verified F0 baseline. Check the AWS worker deployment."
+          : !baselineMetrics ? "F0 was returned without a verified score. Check the AWS API deployment."
+            : baselineView.error ?? "F0 could not be displayed.";
   const sceneOverlay = useMemo(() => draftSolution && overlayDraw
     ? { ...overlayDraw, legs: [], violations: [], crossings: [], overlaps: [], bends: [] }
     : isBackend ? overlayDraw : null, [draftSolution, overlayDraw, isBackend]);
@@ -1073,7 +1087,8 @@ export default function App() {
         <details className="toolbar-more" ref={toolbarMenuRef}>
           <summary aria-label="More model actions" title="More model actions"><MoreHorizontal size={17} /><span>MORE</span></summary>
           <div className="toolbar-menu" onClick={() => { if (toolbarMenuRef.current) toolbarMenuRef.current.open = false; }}>
-            {baselineSolution && <button type="button" onClick={() => { setComparisonOpen((value) => !value); setComparePosition(50); }}><GitCompareArrows size={15} /><span>{comparisonOpen ? "Exit comparison" : "Compare with F0"}</span></button>}
+            {hasSelectedPlan && <button type="button" disabled={!baselineSolution} title={baselineSolution ? "Compare the verified F0 baseline with the optimized result" : compareUnavailableReason} onClick={() => { setComparisonOpen((value) => !value); setComparePosition(50); }}><GitCompareArrows size={15} /><span>{comparisonOpen ? "Exit comparison" : "Compare with F0"}</span></button>}
+            {hasSelectedPlan && !baselineSolution && <p className="toolbar-menu-note">{compareUnavailableReason}</p>}
             {draftSolution && <button type="button" onClick={() => { draftControllerRef.current?.abort(); setDraftSolution(null); setDraftStatus(null); setDraftMessage(""); }}><RotateCcw size={15} /><span>Reset hub edit</span></button>}
             {hasSelectedPlan && activeSolution && <button type="button" onClick={() => window.print()} disabled={isBackend && !overlayDraw?.metrics} title={isBackend && !overlayDraw?.metrics ? "Load the matching checker overlay for a complete report" : "Export PDF report"}><FileDown size={15} /><span>PDF report</span></button>}
             <button type="button" onClick={() => setDrawerOpen((value) => !value)}><Braces size={15} /><span>{drawerOpen ? "Close output JSON" : "View output JSON"}</span></button>

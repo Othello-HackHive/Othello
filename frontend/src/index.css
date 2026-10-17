@@ -1237,7 +1237,7 @@ button {
   bottom: calc(100% + 12px);
   display: grid;
   gap: 2px;
-  width: 192px;
+  width: 224px;
   padding: 5px;
   border: 1px solid #314655;
   border-radius: 7px;
@@ -1261,6 +1261,7 @@ button {
 }
 .view-toolbar .toolbar-menu button:hover { background: #233544; color: #fff; }
 .view-toolbar .toolbar-menu button:disabled { opacity: .45; cursor: not-allowed; }
+.toolbar-menu-note { margin: 1px 7px 7px; color: #9aafbd; font: 10px/1.45 "Inter", sans-serif; }
 
 .inspector {
   position: fixed;

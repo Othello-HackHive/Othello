@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/hub-edit.test.cjs",
+    "test": "node --test tests/hub-edit.test.cjs tests/cloud-baseline.test.cjs",
     "build": "vite build",
     "preview": "vite preview"
   },
