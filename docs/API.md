@@ -47,7 +47,9 @@ else showProblem(job.error);              // {code, stage, message, hint}
 | `POST /api/jobs` | start a job (answer `202`) |
 | `GET /api/jobs/{id}` | status, `result` summary, `error`, `files` (links) |
 | `GET /api/jobs/{id}/events?after=N` | progress steps from position `N`; reply has `events`, `next`, `status`, `done` |
-| `GET /api/jobs/{id}/result/{kind}` | one file; `kind` is `overlay`, `official`, `failure`, `picture`, `log` or `settings` |
+| `GET /api/jobs/{id}/result/{kind}` | one file; `kind` is `overlay`, `official`, `baseline`, `failure`, `picture`, `log` or `settings` |
+| `POST /api/jobs/{id}/validate` | independently check an edited official-schema design against the job's original plan and settings |
+| `POST /api/jobs/{id}/reroute` | reroute one manually moved hub's ring at its fixed location and check the AWS result |
 | `POST /api/jobs/{id}/cancel` | stop a queued or running job (`409` if it already ended) |
 | `DELETE /api/jobs/{id}` | forget a finished job (`409` if it is still active) |
 
@@ -71,11 +73,30 @@ An unknown setting or an out-of-range value is an error, never silently ignored.
 
 ## Progress steps
 
-Each step is `{"stage", "message", "elapsed_s", ...}`. Stages come in this order: `started`, `loaded` (`rooms`, `nodes`), `bound` (`lower_bound`), `searching` (`hub_counts`, `budget_s`), `checking`, `writing`, `done` (`status`, `hubs`, `J`, `code`). The search itself is one long step: the best design so far is not streamed, only the final one.
+Each step is `{"stage", "message", "elapsed_s", ...}`. Stages begin with `started`, `loaded` (`rooms`, `nodes`), `bound` (`lower_bound`), and `searching` (`hub_counts`, `budget_s`). During search, each checker-verified F0 baseline or new incumbent emits a `candidate` event with `candidate_kind` (`baseline` or `incumbent`), measured `metrics` (`L`, `X`, `O`, `B`, `J`), and `weights` for the four cost terms. Search then emits `checking`, `writing`, and `done` (`status`, `hubs`, `J`, `code`). The `baseline` result file contains the first checker-verified F0 design when one can be exported. Some plans have no verified F0 candidate, so the baseline file and candidate events may be absent.
+
+## Validate an edited design
+
+After a job succeeds, send a candidate in the same JSON schema as its `official` result file:
+
+```js
+const checked = await fetch(`${API}/api/jobs/${job_id}/validate`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(editedOfficialDesign),
+}).then((response) => response.json());
+// { valid, metrics: { L, X, O, B, J, ... }, checks: [...], violations: [...] }
+```
+
+The response reports the independent checker result and measured cost for that candidate. It does not replace the job's saved result. A job that has not succeeded returns `409`; malformed candidate JSON returns `400`. Include `x-api-key` when the API uses a key.
+
+## Reroute a moved hub
+
+After a job succeeds, send `{ "hub_id": "H1", "candidate": editedOfficialDesign }` to `POST /api/jobs/{id}/reroute`. The candidate uses the same official JSON schema; set the selected hub's `location` and `room_id` to its new legal point. The API keeps that point and all hub assignments fixed, searches node orders and routes for the selected ring, and runs the independent checker on the result. A successful response is `{ "official": ..., "validation": ... }`, where `validation.metrics.J` is the measured score. The original job result is unchanged. A move outside the hub's assigned room returns `400`; a position with no checker-valid route returns `422`. The request has a bounded search time inside the API Lambda.
 
 ## Errors
 
-Every error answer is `{"error": {"code", "message", "hint"}}` with a matching HTTP status: `400` (`BAD_INPUT`, `BAD_SETTINGS`, `BAD_REQUEST`), `401` (`UNAUTHORIZED`), `404` (`NOT_FOUND`), `405` (`METHOD_NOT_ALLOWED`), `409` (`ALREADY_FINISHED`, `STILL_RUNNING`), `413` (`TOO_LARGE`), `415` (`UNSUPPORTED_MEDIA_TYPE`), `429` (`BUSY`), `500` (`INTERNAL_ERROR`, never with details), `503` (`SERVICE_UNAVAILABLE`: the solver could not be started; nothing was queued, try again).
+Every error answer is `{"error": {"code", "message", "hint"}}` with a matching HTTP status: `400` (`BAD_INPUT`, `BAD_SETTINGS`, `BAD_REQUEST`), `401` (`UNAUTHORIZED`), `404` (`NOT_FOUND`), `405` (`METHOD_NOT_ALLOWED`), `409` (`ALREADY_FINISHED`, `STILL_RUNNING`), `413` (`TOO_LARGE`), `415` (`UNSUPPORTED_MEDIA_TYPE`), `422` (`NO_VALID_ROUTE`), `429` (`BUSY`), `500` (`INTERNAL_ERROR`, never with details), `503` (`SERVICE_UNAVAILABLE`: the solver could not be started; nothing was queued, try again).
 
 ## Safety and access
 

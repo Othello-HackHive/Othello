@@ -756,13 +756,13 @@ export default function App() {
               </button>
               <a href="#territories" className="scroll-action">SEE HOW IT WAS DERIVED <ChevronDown size={16} /></a>
               {(draftStatus === "valid" || hubEditFailed) && (
-                <span className={hubEditFailed ? "hub-edit-state failed" : "hub-edit-state"} title={draftMessage}>
+                <span className={hubEditFailed ? "hub-edit-state failed" : "hub-edit-state"}>
                   {hubEditFailed ? "AWS HUB REROUTE FAILED" : "HUB VERIFIED BY AWS"}
                 </span>
               )}
             </div>
-            {cloudState && (
-              <p className={cloudState.status === "failed" || draftStatus === "invalid" || (draftStatus === "preview" && draftMessage) ? "cloud-message cloud-error" : "cloud-message"} role="status">
+            {cloudState && draftStatus !== "preview" && (
+              <p className={cloudState.status === "failed" || draftStatus === "invalid" ? "cloud-message cloud-error" : "cloud-message"} role="status">
                 {hubEditRunning
                   ? "AWS is rerouting the moved hub and checking the new score…"
                   : draftStatus && draftMessage
@@ -947,20 +947,19 @@ export default function App() {
           </div>
         ) : (
           <>
-        <div className="source-line">
+        {draftStatus !== "preview" && <div className="source-line">
           {cloudRunning
             ? `AWS solver ${cloudState?.status} · ${cloudState?.events.at(-1)?.message ?? "waiting for progress"}`
             : draftStatus === "checking" ? "Hub moved · AWS rerouting and checking the ring"
             : draftStatus === "valid" ? "Edited candidate · AWS reroute and checker passed"
             : draftStatus === "invalid" ? "Edited candidate · independent checker found violations"
-            : draftStatus === "preview" ? "Edited candidate · browser preview checks only"
             : cloudState?.status === "failed"
               ? `AWS solver error · ${cloudState.error}`
               : isBackend
                 ? (overlayDraw?.metrics ? "Score and checks from the backend overlay" : "Load the matching overlay for the full score and checks")
                 : "Browser estimate · load an overlay for independent checks"}
-        </div>
-        {draftMessage && <p className={draftStatus === "invalid" ? "edit-feedback invalid" : "edit-feedback"} role="status">{draftMessage}</p>}
+        </div>}
+        {draftStatus !== "preview" && draftMessage && <p className={draftStatus === "invalid" ? "edit-feedback invalid" : "edit-feedback"} role="status">{draftMessage}</p>}
 
         {cloudRunning ? <div className="solver-skeleton" role="status" aria-label="Solver working"><i /><i /><div><i /><i /><i /><i /></div><i /></div> :
         <div className="cost-card">

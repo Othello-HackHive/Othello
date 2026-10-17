@@ -27,6 +27,7 @@ def output_paths(out_dir: str | Path, plan_id: object) -> dict[str, Path]:
     name = safe_name(plan_id)
     paths = {
         "official": folder / f"{name}.json",
+        "baseline": folder / f"{name}.baseline.json",
         "overlay": folder / f"{name}.overlay.json",
         "picture": folder / f"{name}.png",
         "log": folder / f"{name}.log.txt",

@@ -16,6 +16,30 @@ permissions:
   contents: read
 
 jobs:
+  frontend:
+    name: Frontend (Node 22)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+
+      - name: Type-check frontend
+        run: npm run typecheck --prefix frontend
+
+      - name: Build frontend
+        run: npm run build --prefix frontend
+
   backend:
     name: Backend (Python ${{ matrix.python }})
     runs-on: ubuntu-latest

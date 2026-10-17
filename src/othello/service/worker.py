@@ -23,7 +23,7 @@ from othello.service.plan_json import plan_from_json
 from othello.service.store import Job, JobStatus, JobStore
 
 MAX_NOTES = 20
-RESULT_FILE_KINDS = ("official", "overlay", "picture", "log", "failure", "settings")
+RESULT_FILE_KINDS = ("official", "baseline", "overlay", "picture", "log", "failure", "settings")
 
 
 def _summary(outcome: RunOutcome) -> dict[str, Any]:

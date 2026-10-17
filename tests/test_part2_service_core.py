@@ -235,7 +235,7 @@ def test_a_real_upload_is_solved_and_every_result_is_kept(store):
     job = queued(store, one_room_upload(), time_budget_s=8)
     done = execute_job(store, job.job_id, LIMITS)
     assert done.status == "succeeded" and done.plan_id == "UP_1" and done.error is None
-    assert set(done.files) == {"official", "overlay", "picture", "log", "settings"}
+    assert set(done.files) == {"official", "baseline", "overlay", "picture", "log", "settings"}
     assert (
         done.result["status"] == "ok"
         and done.result["hubs"] == 1
@@ -243,12 +243,17 @@ def test_a_real_upload_is_solved_and_every_result_is_kept(store):
     )
     assert done.started_at and done.finished_at >= done.started_at
     official = json.loads(store.get_file(job.job_id, "official"))
+    baseline = json.loads(store.get_file(job.job_id, "baseline"))
+    assert baseline["plan_id"] == official["plan_id"] and baseline["hubs"]
     assert (
         official["plan_id"] == "UP_1"
         and store.get_file(job.job_id, "picture")[:4] == b"\x89PNG"
     )
     stages = [e["stage"] for e in store.events(job.job_id)]
     assert stages[0] == "started" and stages[-1] == "done" and "searching" in stages
+    candidates = [e for e in store.events(job.job_id) if e["stage"] == "candidate"]
+    assert candidates[0]["candidate_kind"] == "baseline"
+    assert all(set(e["metrics"]) == {"L", "X", "O", "B", "J"} for e in candidates)
     assert store.get(job.job_id) == done
 
 

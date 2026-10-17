@@ -5,6 +5,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 from fixtures.uploads import as_bytes, one_room_upload
@@ -381,14 +382,97 @@ def test_a_real_job_runs_through_the_api_and_every_file_can_be_downloaded(finish
         and view["result"]["hubs"] == 1
         and view["error"] is None
     )
-    assert set(view["files"]) == {"official", "overlay", "picture", "log", "settings"}
+    assert set(view["files"]) == {"official", "baseline", "overlay", "picture", "log", "settings"}
     overlay = call(api, "GET", view["files"]["overlay"])
     assert overlay.status == 200 and overlay.content_type == "application/json"
     assert overlay.json()["status"] == "ok" and overlay.json()["schema_version"] == 1
     assert call(api, "GET", view["files"]["official"]).json()["plan_id"] == "UP_1"
+    assert call(api, "GET", view["files"]["baseline"]).json()["plan_id"] == "UP_1"
     picture = call(api, "GET", view["files"]["picture"])
     assert picture.content_type == "image/png" and picture.body[:4] == b"\x89PNG"
     assert call(api, "GET", view["files"]["log"]).content_type.startswith("text/plain")
+
+
+def test_an_edited_candidate_is_checked_without_replacing_the_official_result(finished):
+    api, _store, job_id = finished
+    path = f"/api/jobs/{job_id}/result/official"
+    official = call(api, "GET", path).json()
+    checked = call(api, "POST", f"/api/jobs/{job_id}/validate", as_bytes(official), JSON)
+    assert checked.status == 200 and checked.json()["valid"] is True
+    assert checked.json()["metrics"]["J"] >= 0
+
+    edited = json.loads(json.dumps(official))
+    edited["hubs"][0]["location"]["x"] += 100
+    rejected = call(api, "POST", f"/api/jobs/{job_id}/validate", as_bytes(edited), JSON)
+    assert rejected.status == 200 and rejected.json()["valid"] is False
+    assert rejected.json()["violations"]
+    assert call(api, "GET", path).json() == official
+    assert call(api, "POST", f"/api/jobs/{job_id}/validate", b"{}", JSON).status == 400
+
+
+def test_moved_hub_is_rerouted_and_checked_on_the_api(finished):
+    from shapely.geometry import Point
+
+    from othello.service.config import build_job_config
+    from othello.service.plan_json import plan_from_json
+
+    api, store, job_id = finished
+    path = f"/api/jobs/{job_id}/result/official"
+    original = call(api, "GET", path).json()
+    edited = json.loads(json.dumps(original))
+    hub = edited["hubs"][0]
+    cfg, _ = build_job_config(store.get(job_id).settings, api.limits)
+    plan = plan_from_json(store.get_file(job_id, "input"), cfg)
+    zone = plan.hub_zones_m[hub["room_id"]]
+    x, y = hub["location"]["x"], hub["location"]["y"]
+    move = next((point for point in ((x + 0.1, y), (x - 0.1, y), (x, y + 0.1), (x, y - 0.1))
+                 if zone.covers(Point(point))), None)
+    assert move is not None
+    hub["location"] = {"x": move[0], "y": move[1]}
+    reply = call(api, "POST", f"/api/jobs/{job_id}/reroute",
+                 as_bytes({"hub_id": hub["hub_id"], "candidate": edited}), JSON)
+    assert reply.status == 200, reply.json()
+    result = reply.json()
+    assert result["validation"]["valid"] is True
+    assert result["validation"]["metrics"]["J"] >= 0
+    assert result["official"]["hubs"][0]["location"]["x"] == pytest.approx(move[0], abs=0.0001)
+    assert result["official"]["hubs"][0]["location"]["y"] == pytest.approx(move[1], abs=0.0001)
+    assert result["official"]["hubs"][0]["route_segments"][0]["polyline"][0] == pytest.approx(move, abs=0.0001)
+    assert call(api, "GET", path).json() == original
+
+    hub["location"]["x"] += 100
+    outside = call(api, "POST", f"/api/jobs/{job_id}/reroute",
+                   as_bytes({"hub_id": hub["hub_id"], "candidate": edited}), JSON)
+    assert outside.status == 400 and outside.json()["error"]["code"] == "BAD_REQUEST"
+
+
+def test_three_room_upload_can_reroute_a_hub(tmp_path):
+    from shapely.geometry import Point
+
+    from othello.service.config import build_job_config
+    from othello.service.plan_json import plan_from_json
+
+    api, store, _ = make_api(tmp_path, InlineLauncher)
+    upload = json.loads((Path(__file__).parent / "data/uploads/three_rooms.json").read_text())
+    started = post_plan(api, upload=upload, settings={"time_budget_s": 10})
+    job_id = started.json()["job_id"]
+    assert call(api, "GET", f"/api/jobs/{job_id}").json()["status"] == "succeeded"
+    original = call(api, "GET", f"/api/jobs/{job_id}/result/official").json()
+    edited = json.loads(json.dumps(original))
+    cfg, _ = build_job_config(store.get(job_id).settings, api.limits)
+    plan = plan_from_json(store.get_file(job_id, "input"), cfg)
+    hub = edited["hubs"][0]
+    x, y = hub["location"]["x"], hub["location"]["y"]
+    zone = plan.hub_zones_m[hub["room_id"]]
+    move = next((point for point in ((x + 0.1, y), (x - 0.1, y), (x, y + 0.1), (x, y - 0.1))
+                 if zone.covers(Point(point))), None)
+    assert move is not None
+    hub["location"] = {"x": move[0], "y": move[1]}
+    reply = call(api, "POST", f"/api/jobs/{job_id}/reroute",
+                 as_bytes({"hub_id": hub["hub_id"], "candidate": edited}), JSON)
+    assert reply.status == 200, reply.json()
+    assert reply.json()["validation"]["valid"]
+    assert reply.json()["official"]["hubs"][1:] == original["hubs"][1:]
 
 
 def test_the_progress_steps_of_a_real_job_can_be_followed_by_polling(finished):

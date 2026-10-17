@@ -69,8 +69,8 @@ The role can only be used by workflows of the `Othello-HackHive/Othello` reposit
 ## After the first deploy
 
 1. Try it: `curl https://<api-address>/health` should answer `{"status":"ok","version":"1"}`. Then upload a sample: `curl -X POST https://<api-address>/api/jobs -H "Content-Type: application/json" --data-binary @tests/data/uploads/one_room.json`, and follow the `poll` address from the answer.
-2. Give Ritvik the API address (the `ApiUrl` output, no trailing slash). In Amplify it belongs in an environment variable of the frontend, and the Amplify website address must be in `ALLOWED_ORIGINS`, otherwise browsers refuse the answers.
-3. If you set `OTHELLO_API_KEY`, give the same value to Ritvik for the `x-api-key` header.
+2. Set `VITE_OTHELLO_API_URL` in Amplify to the `ApiUrl` output (no trailing slash). The repository's `amplify.yml` builds and publishes `frontend/dist`. Rebuild the frontend after changing the variable. The Amplify website address must be in `ALLOWED_ORIGINS`, otherwise browsers refuse the answers.
+3. If you set `OTHELLO_API_KEY`, set the same value as `VITE_OTHELLO_API_KEY` for the frontend build so it sends `x-api-key`. This value is visible in public JavaScript; it is not secret authentication.
 
 ## Settings you can change (template parameters)
 

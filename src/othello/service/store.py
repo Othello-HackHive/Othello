@@ -34,13 +34,14 @@ MAX_EVENTS = 500
 FILE_KINDS: dict[str, tuple[str, str]] = {
     "input": ("input.json", "application/json"),
     "official": ("official.json", "application/json"),
+    "baseline": ("baseline.json", "application/json"),
     "overlay": ("overlay.json", "application/json"),
     "failure": ("failure.json", "application/json"),
     "settings": ("settings.json", "application/json"),
     "picture": ("picture.png", "image/png"),
     "log": ("log.txt", "text/plain; charset=utf-8"),
 }
-PUBLIC_KINDS = ("official", "overlay", "failure", "picture", "log", "settings")
+PUBLIC_KINDS = ("official", "baseline", "overlay", "failure", "picture", "log", "settings")
 
 
 class Job(BaseModel):

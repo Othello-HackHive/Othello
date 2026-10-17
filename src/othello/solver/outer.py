@@ -178,6 +178,7 @@ def optimize_partitions(
     checker: Callable[[Any, Any, Any], Any] | None = None,
     cache: RoutingCache | None = None, deadline: float | None = None,
     lower_bound_hubs: int | None = None,
+    on_candidate: Callable[[str, dict[str, Any], Any], None] | None = None,
 ) -> OuterSearchResult:
     """Anytime search over Part 1's supplied hub-count batches.
 
@@ -236,12 +237,23 @@ def optimize_partitions(
     configs_seen = 0
     timed_out = False
     candidate_configuration_error = False
+    baseline_reported = False
 
-    def accept(design: dict[str, Any], score: float, hub_count: int, gap: float) -> None:
+    def report(kind: str, design: dict[str, Any], validation: Any) -> None:
+        if on_candidate is not None:
+            on_candidate(kind, deepcopy(design), validation)
+
+    def accept(design: dict[str, Any], score: float, hub_count: int, gap: float,
+               validation: Any | None = None) -> None:
         nonlocal incumbent, best_key
         key = (hub_count, score, gap, _design_key(design))
         if best_key is None or key < best_key:
             incumbent, best_key = deepcopy(design), key
+            if on_candidate is not None and checker is not None:
+                checked, verified_score, _ = (validation, score, None) if validation is not None else \
+                    _invoke_checker(checker, plan, design, config)
+                if verified_score is not None:
+                    report("incumbent", design, checked)
 
     for count in range(lower_bound_hubs, counts[-1] + 1):
         if count not in partition_batches:
@@ -281,11 +293,14 @@ def optimize_partitions(
                     if provisional is None:
                         provisional = deepcopy(quick.design)
                     if checker is not None:
-                        _, score, failure = _invoke_checker(checker, plan, quick.design, config)
+                        checked, score, failure = _invoke_checker(checker, plan, quick.design, config)
                         if failure is not None:
                             diagnostics.append(f"H={count}: quick F0 {failure}")
                         if score is not None:
-                            accept(quick.design, score, count, gap)
+                            if not baseline_reported:
+                                report("baseline", quick.design, checked)
+                                baseline_reported = True
+                            accept(quick.design, score, count, gap, checked)
                     _check(effective_deadline)
                 else:
                     diagnostics.append(f"H={count}: quick F0 {quick.status}: {'; '.join(quick.diagnostics)}")
@@ -311,11 +326,14 @@ def optimize_partitions(
                     if provisional is None:
                         provisional = deepcopy(baseline.design)
                     if checker is not None and _design_key(baseline.design) != quick_signature:
-                        _, score, failure = _invoke_checker(checker, plan, baseline.design, config)
+                        checked, score, failure = _invoke_checker(checker, plan, baseline.design, config)
                         if failure is not None:
                             diagnostics.append(f"H={count}: F0 {failure}")
                         if score is not None:
-                            accept(baseline.design, score, count, gap)
+                            if not baseline_reported:
+                                report("baseline", baseline.design, checked)
+                                baseline_reported = True
+                            accept(baseline.design, score, count, gap, checked)
                     _check(effective_deadline)
                     selected = select_whole_design_routes(plan, baseline.design, config, checker, route_cache,
                                                           effective_deadline)
@@ -342,11 +360,11 @@ def optimize_partitions(
                         if _design_key(alternative) == baseline_signature:
                             continue
                         configs_seen += 1
-                        _, score, failure = _invoke_checker(checker, plan, alternative, config)
+                        checked, score, failure = _invoke_checker(checker, plan, alternative, config)
                         if failure is not None:
                             diagnostics.append(f"H={count}: alternative {failure}")
                         if score is not None:
-                            accept(alternative, score, count, gap)
+                            accept(alternative, score, count, gap, checked)
                         _check(effective_deadline)
                         selected = select_whole_design_routes(plan, alternative, config, checker,
                                                               route_cache, effective_deadline)
