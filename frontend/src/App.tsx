@@ -40,7 +40,7 @@ import SolutionReport from "./components/SolutionReport";
 import { normalizePlan, pointInPolygon, PRESET_IDS, PRESET_JSON, type PlanModel } from "./lib/resplan";
 import { optimize, type Solution } from "./lib/optimizer";
 import { parseOverlay, solutionFromOfficial, type OverlayDraw } from "./lib/overlay";
-import { cloudAvailable, isCloudPlan, rerouteCloudHub, solveCloudPlan, type CloudEvent } from "./lib/cloudApi";
+import { CloudApiError, cloudAvailable, isCloudPlan, rerouteCloudHub, solveCloudPlan, type CloudEvent } from "./lib/cloudApi";
 import { viewerPlanFromCloud } from "./lib/cloudPlan";
 import { createShareLink, readShareLink, type SharedView } from "./lib/shareLink";
 
@@ -494,6 +494,9 @@ export default function App() {
     }
     if (!jobId || !resultSolution) {
       setDraftStatus("preview");
+      if (cloudAvailable && cloudPayloadRef.current) {
+        setDraftMessage("No completed AWS job is attached to this result. Re-upload the plan to enable hub rerouting.");
+      }
       return;
     }
     const controller = new AbortController();
@@ -522,7 +525,9 @@ export default function App() {
     }).catch((error) => {
       if (controller.signal.aborted) return;
       setDraftStatus("preview");
-      setDraftMessage(error instanceof Error ? error.message : "Could not reroute this hub on AWS");
+      setDraftMessage(error instanceof CloudApiError && error.status === 404
+        ? "Hub rerouting is unavailable on the deployed AWS API, or this job has expired. Deploy the backend changes and re-upload the plan."
+        : error instanceof Error ? `AWS hub reroute failed: ${error.message}` : "Could not reroute this hub on AWS");
     });
   }, [plan, activeSolution, cloudState?.status, cloudState?.jobId, resultSolution, overlayDraw]);
 
@@ -539,6 +544,7 @@ export default function App() {
   const hasSelectedPlan = planKey !== "";
   const cloudRunning = cloudState?.status === "queued" || cloudState?.status === "running";
   const hubEditRunning = draftStatus === "checking";
+  const hubEditFailed = cloudState?.status === "succeeded" && draftStatus === "preview" && Boolean(draftMessage);
   const sceneOverlay = useMemo(() => draftSolution && overlayDraw
     ? { ...overlayDraw, legs: [], violations: [], crossings: [], overlaps: [], bends: [] }
     : isBackend ? overlayDraw : null, [draftSolution, overlayDraw, isBackend]);
@@ -749,6 +755,11 @@ export default function App() {
                 {hubEditRunning ? "REROUTING HUB ON AWS…" : cloudRunning ? "SOLVING ON AWS…" : cloudPayloadRef.current && cloudAvailable ? "RERUN ON AWS" : runState === "solving" ? "REPLAYING…" : "REPLAY SOLUTION STEPS"}
               </button>
               <a href="#territories" className="scroll-action">SEE HOW IT WAS DERIVED <ChevronDown size={16} /></a>
+              {(draftStatus === "valid" || hubEditFailed) && (
+                <span className={hubEditFailed ? "hub-edit-state failed" : "hub-edit-state"} title={draftMessage}>
+                  {hubEditFailed ? "AWS HUB REROUTE FAILED" : "HUB VERIFIED BY AWS"}
+                </span>
+              )}
             </div>
             {cloudState && (
               <p className={cloudState.status === "failed" || draftStatus === "invalid" || (draftStatus === "preview" && draftMessage) ? "cloud-message cloud-error" : "cloud-message"} role="status">
