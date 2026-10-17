@@ -70,19 +70,33 @@ class LambdaLauncher:
 _cache: dict[str, Any] = {}
 
 
-def _parts() -> tuple[Api, JobStore, ServiceConfig]:
-    if not _cache:
+def _store_and_limits() -> tuple[JobStore, ServiceConfig]:
+    """What both functions need: the job store and the limits. Needs only JOBS_TABLE and JOBS_BUCKET."""
+    if "store" not in _cache:
         from othello.service.store_aws import AwsJobStore
 
         limits = ServiceConfig.from_env()
-        store = AwsJobStore(
+        _cache["limits"] = limits
+        _cache["store"] = AwsJobStore(
             os.environ["JOBS_TABLE"],
             os.environ["JOBS_BUCKET"],
             retention_s=limits.retention_s,
         )
+    return _cache["store"], _cache["limits"]
+
+
+def _api() -> Api:
+    """The web API. Only this function needs WORKER_FUNCTION (to start jobs); the worker never calls it."""
+    if "api" not in _cache:
+        store, limits = _store_and_limits()
         launcher = LambdaLauncher(store, os.environ["WORKER_FUNCTION"])
-        _cache.update(api=Api(store, launcher, limits), store=store, limits=limits)
-    return _cache["api"], _cache["store"], _cache["limits"]
+        _cache["api"] = Api(store, launcher, limits)
+    return _cache["api"]
+
+
+def _parts() -> tuple[Api, JobStore, ServiceConfig]:
+    store, limits = _store_and_limits()
+    return _api(), store, limits
 
 
 # ---------------------------------------------------------------- the web API
@@ -121,8 +135,7 @@ def event_response(response: Response) -> dict[str, Any]:
 
 
 def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
-    api, _, _ = _parts()
-    return event_response(api.handle(request_from_event(event)))
+    return event_response(_api().handle(request_from_event(event)))
 
 
 # ---------------------------------------------------------------- the worker
@@ -132,7 +145,7 @@ def worker_handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]
     """Run one job.  Never raises: a failing Lambda would be retried and could run a job twice."""
     job_id = str((event or {}).get("job_id", ""))
     try:
-        _, store, limits = _parts()
+        store, limits = _store_and_limits()
         job = execute_job(store, job_id, limits)
         status = job.status if job is not None else "not_found"
     except Exception:

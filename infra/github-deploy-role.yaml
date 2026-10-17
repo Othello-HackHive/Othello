@@ -76,6 +76,7 @@ Resources:
                 Action: cloudformation:*
                 Resource:
                   - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${StackName}/*"
+                  - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${StackName}-*/*" # SAM's "CompanionStack" for the image repositories
                   - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/aws-sam-cli-managed-default/*"
               - Sid: Transforms
                 Effect: Allow
@@ -108,6 +109,11 @@ Resources:
                 Effect: Allow
                 Action: ecr:*
                 Resource:
+                  # SAM names the image repositories after the stack with the dashes removed
+                  # (othellocablering3a2bbe03/apifunction...), so both spellings are allowed.
+                  - !Sub
+                    - "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${Compact}*"
+                    - Compact: !Join ["", !Split ["-", !Ref StackName]]
                   - !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${StackName}*"
                   - !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/aws-sam-cli-managed-default*"
               - Sid: RolesOfTheStackOnly

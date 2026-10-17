@@ -1,6 +1,7 @@
 name: Deploy
 
-# Deploys the solver's web API to AWS after the CI run on main succeeded (or by hand from the Actions tab).
+# Deploys the solver's web API to AWS: by hand from the Actions tab, or automatically after every green CI run on
+# main once the repository variable AUTO_DEPLOY is set to true (off by default).
 # Nothing happens until the one-time AWS setup is done and the repository variable
 # AWS_DEPLOY_ROLE_ARN exists (see docs/DEPLOYMENT.md). No AWS password is stored anywhere:
 # GitHub proves its identity with a short-lived token and AWS hands back temporary permissions.
@@ -33,7 +34,7 @@ jobs:
     if: >
       vars.AWS_DEPLOY_ROLE_ARN != '' &&
       (github.event_name == 'workflow_dispatch' ||
-       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
+       (vars.AUTO_DEPLOY == 'true' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
     steps:
       - name: Get the code that CI tested
         uses: actions/checkout@v4
