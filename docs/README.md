@@ -1,6 +1,6 @@
-# Othello: Cable Ring Challenge, docs index
+# NodeRithm: Cable Ring Challenge, docs index
 
-Team Othello's v1 specification. The official 8-slide PPT is the final authority; where a doc and the PPT differ, the PPT wins.
+NodeRithm's v1 specification. The official 8-slide PPT is the final authority; where a doc and the PPT differ, the PPT wins.
 
 | Read in this order | What it gives you |
 |---|---|

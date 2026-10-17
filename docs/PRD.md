@@ -1,4 +1,4 @@
-# PRD: Cable Ring Solver (Team Othello)
+# PRD: Cable Ring Solver (NodeRithm)
 
 Version 1.0 (frozen v1 scope). Source of truth: the official 8-slide PPT "Cable Ring Challenge - Problem Statement4.pptx" (UR Hackathon 2026H2). Where this document and the PPT differ, the PPT wins.
 
