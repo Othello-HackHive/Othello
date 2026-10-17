@@ -10,7 +10,7 @@ import {
   RenderPass,
   UnrealBloomPass,
 } from "three-stdlib";
-import type { PlanModel, Vec2 } from "../lib/resplan";
+import { distanceToPolygon, pointInPolygon, type PlanModel, type Vec2 } from "../lib/resplan";
 import type { Solution } from "../lib/optimizer";
 import type { OverlayDraw } from "../lib/overlay";
 
@@ -45,6 +45,9 @@ type TwinSceneProps = {
   onInspect: (item: Inspection | null) => void;
   onPhaseChange: (phase: number) => void;
   onScrollView: () => void;
+  onHubMove?: (hubId: string, point: Vec2) => void;
+  showHeatmap: boolean;
+  verified: boolean;
 };
 
 const WALL_H = 2.2;
@@ -126,10 +129,14 @@ export default function TwinScene({
   onInspect,
   onPhaseChange,
   onScrollView,
+  onHubMove,
+  showHeatmap,
+  verified,
 }: TwinSceneProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const zoneGroupRef = useRef<THREE.Group | null>(null);
   const routeGroupRef = useRef<THREE.Group | null>(null);
+  const heatmapGroupRef = useRef<THREE.Group | null>(null);
   const wallPartsRef = useRef<THREE.Object3D[]>([]);
   const hubGroupsRef = useRef<THREE.Group[]>([]);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
@@ -271,9 +278,12 @@ export default function TwinScene({
     const architectureGroup = new THREE.Group();
     const hardwareGroup = new THREE.Group();
     const routeGroup = new THREE.Group();
-    planGroup.add(zoneGroup, architectureGroup, hardwareGroup, routeGroup);
+    const heatmapGroup = new THREE.Group();
+    planGroup.add(zoneGroup, heatmapGroup, architectureGroup, hardwareGroup, routeGroup);
     zoneGroupRef.current = zoneGroup;
     routeGroupRef.current = routeGroup;
+    heatmapGroupRef.current = heatmapGroup;
+    heatmapGroup.visible = showHeatmap;
 
     /* ------------------------------------------------- procedural slabs */
     const hatch = hazardTexture();
@@ -472,6 +482,7 @@ export default function TwinScene({
 
     solution.hubs.forEach((hub, index) => {
       const group = new THREE.Group();
+      group.userData.hubId = hub.hub_id;
       group.position.copy(frame.toWorld(hub.location, 0.13));
       const led = new THREE.Color(HUB_COLORS[index % HUB_COLORS.length]).multiplyScalar(2.2);
 
@@ -751,28 +762,130 @@ export default function TwinScene({
       overlay.bends.forEach((point) => addMarker(point, bendMaterial, bendGeometry));
     }
 
+    /* Count route runs through each floor cell. Multiple runs turn blue cells red. */
+    const cellSize = Math.max(0.35, frame.span / 40);
+    const columns = Math.max(1, Math.ceil(plan.bounds.size[0] / cellSize));
+    const rows = Math.max(1, Math.ceil(plan.bounds.size[1] / cellSize));
+    const density = new Map<number, number>();
+    solution.hubs.forEach((hub) => hub.route_segments.forEach((segment) => {
+      const touched = new Set<number>();
+      segment.polyline.forEach((point, index) => {
+        if (!index) return;
+        const start = segment.polyline[index - 1];
+        const length = Math.hypot(point[0] - start[0], point[1] - start[1]);
+        const steps = Math.max(1, Math.ceil(length / (cellSize * 0.33)));
+        for (let step = 0; step <= steps; step += 1) {
+          const t = step / steps;
+          const x = start[0] + (point[0] - start[0]) * t;
+          const y = start[1] + (point[1] - start[1]) * t;
+          const col = Math.floor((x - plan.bounds.min[0]) / cellSize);
+          const row = Math.floor((y - plan.bounds.min[1]) / cellSize);
+          if (col >= 0 && col < columns && row >= 0 && row < rows) touched.add(row * columns + col);
+        }
+      });
+      touched.forEach((key) => density.set(key, (density.get(key) ?? 0) + 1));
+    }));
+    const occupied = [...density].filter(([key]) => {
+      const center: Vec2 = [plan.bounds.min[0] + ((key % columns) + 0.5) * cellSize,
+        plan.bounds.min[1] + (Math.floor(key / columns) + 0.5) * cellSize];
+      return plan.rooms.some((room) => pointInPolygon(center, room.polygon));
+    });
+    if (occupied.length) {
+      const heatGeometry = new THREE.PlaneGeometry(cellSize * 0.94, cellSize * 0.94);
+      heatGeometry.rotateX(-Math.PI / 2);
+      const heatMaterial = new THREE.MeshBasicMaterial({ color: "#ffffff", transparent: true, opacity: 0.42, depthWrite: false, side: THREE.DoubleSide });
+      const heatCells = new THREE.InstancedMesh(heatGeometry, heatMaterial, occupied.length);
+      const highest = Math.max(...occupied.map(([, count]) => count), 2);
+      const matrix = new THREE.Matrix4();
+      occupied.forEach(([key, count], index) => {
+        const center: Vec2 = [plan.bounds.min[0] + ((key % columns) + 0.5) * cellSize,
+          plan.bounds.min[1] + (Math.floor(key / columns) + 0.5) * cellSize];
+        matrix.makeTranslation(...frame.toWorld(center, 0.115).toArray());
+        heatCells.setMatrixAt(index, matrix);
+        const heat = Math.min(1, (count - 1) / (highest - 1));
+        heatCells.setColorAt(index, new THREE.Color("#2b8cff").lerp(new THREE.Color("#ff352b"), heat));
+      });
+      heatCells.instanceMatrix.needsUpdate = true;
+      if (heatCells.instanceColor) heatCells.instanceColor.needsUpdate = true;
+      heatmapGroup.add(heatCells);
+    }
+
+    const verifiedParticles: Array<{ points: THREE.Points; center: THREE.Vector3; phases: number[] }> = [];
+    if (verified) solution.hubs.forEach((hub, index) => {
+      const count = 9;
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(count * 3), 3));
+      const material = new THREE.PointsMaterial({ color: HUB_COLORS[index % HUB_COLORS.length], size: 0.085, transparent: true, opacity: 0.62, depthWrite: false, sizeAttenuation: true });
+      const points = new THREE.Points(geometry, material);
+      hardwareGroup.add(points);
+      verifiedParticles.push({ points, center: frame.toWorld(hub.location, 0.24), phases: Array.from({ length: count }, (_, i) => i * Math.PI * 2 / count) });
+    });
+
     /* -------------------------------------------------------- raycasting */
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
     let hovered: THREE.Object3D | null = null;
+    let dragState: { hubId: string; group: THREE.Group; original: Vec2; current: Vec2; pointerId: number } | null = null;
+    const dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -0.13);
+    const dragHit = new THREE.Vector3();
 
     const updatePointer = (event: PointerEvent) => {
       const bounds = renderer.domElement.getBoundingClientRect();
       pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1;
       pointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1;
       raycaster.setFromCamera(pointer, camera);
+      if (dragState) {
+        if (!raycaster.ray.intersectPlane(dragPlane, dragHit)) return;
+        const local = planGroup.worldToLocal(dragHit.clone());
+        const candidate: Vec2 = [Number((local.x + plan.bounds.center[0]).toFixed(3)), Number((local.z + plan.bounds.center[1]).toFixed(3))];
+        const hub = solution.hubs.find((item) => item.hub_id === dragState?.hubId);
+        const valid = hub?.assigned_rooms.some((id) => {
+          const room = plan.rooms.find((item) => item.id === id);
+          return room && pointInPolygon(candidate, room.polygon) && distanceToPolygon(candidate, room.polygon) >= 0.5;
+        });
+        renderer.domElement.style.cursor = valid ? "grabbing" : "not-allowed";
+        if (valid) {
+          dragState.current = candidate;
+          dragState.group.position.copy(frame.toWorld(candidate, 0.13));
+        }
+        return;
+      }
       const next = raycaster.intersectObjects(pickables, false)[0]?.object ?? null;
       if (hovered !== next) {
         hovered = next;
-        renderer.domElement.style.cursor = hovered ? "crosshair" : "grab";
+        renderer.domElement.style.cursor = hovered?.userData.inspection?.type === "hub" && onHubMove ? "move" : hovered ? "crosshair" : "grab";
         mount.classList.toggle("has-pick", Boolean(hovered));
       }
     };
-    const handlePick = () => {
+    const handlePick = (event: PointerEvent) => {
+      updatePointer(event);
       if (hovered?.userData.inspection) onInspect(hovered.userData.inspection as Inspection);
+      const picked = hovered?.userData.inspection as Inspection | undefined;
+      if (!picked || picked.type !== "hub" || !onHubMove) return;
+      const hub = solution.hubs.find((item) => item.hub_id === picked.id);
+      const group = hubGroups.find((item) => item.userData.hubId === picked.id);
+      if (!hub || !group) return;
+      dragState = { hubId: hub.hub_id, group, original: [...hub.location] as Vec2, current: [...hub.location] as Vec2, pointerId: event.pointerId };
+      controls.enabled = false;
+      renderer.domElement.style.touchAction = "none";
+      renderer.domElement.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    };
+    const finishDrag = (event: PointerEvent) => {
+      if (!dragState || event.pointerId !== dragState.pointerId) return;
+      const { hubId, original, current, group } = dragState;
+      dragState = null;
+      controls.enabled = !window.matchMedia("(max-width: 860px)").matches || modelViewRef.current;
+      renderer.domElement.style.touchAction = window.matchMedia("(max-width: 860px)").matches && !modelViewRef.current ? "pan-y" : "none";
+      if (renderer.domElement.hasPointerCapture(event.pointerId)) renderer.domElement.releasePointerCapture(event.pointerId);
+      if (event.type === "pointercancel") group.position.copy(frame.toWorld(original, 0.13));
+      else if (Math.hypot(current[0] - original[0], current[1] - original[1]) > 0.02) onHubMove?.(hubId, current);
+      renderer.domElement.style.cursor = "grab";
     };
     renderer.domElement.addEventListener("pointermove", updatePointer);
     renderer.domElement.addEventListener("pointerdown", handlePick);
+    renderer.domElement.addEventListener("pointerup", finishDrag);
+    renderer.domElement.addEventListener("pointercancel", finishDrag);
 
     /* ------------------------------------------- scroll choreography */
     let currentPhase = -1;
@@ -857,6 +970,17 @@ export default function TwinScene({
         const ring = group.children.find((child) => child.userData.pulseRing);
         if (ring) ring.scale.setScalar(1 + Math.sin(elapsed * 2.6 + index) * 0.085);
       });
+      verifiedParticles.forEach(({ points, center, phases }) => {
+        const positions = points.geometry.getAttribute("position") as THREE.BufferAttribute;
+        phases.forEach((phase, index) => {
+          const theta = phase + elapsed * 0.38;
+          positions.setXYZ(index,
+            center.x + Math.cos(theta) * (0.52 + Math.sin(elapsed * 0.7 + index) * 0.06),
+            center.y + 0.12 + Math.sin(elapsed * 1.2 + phase) * 0.13,
+            center.z + Math.sin(theta) * (0.52 + Math.sin(elapsed * 0.7 + index) * 0.06));
+        });
+        positions.needsUpdate = true;
+      });
       violationPulses.forEach((ring, index) => {
         const pulse = 1 + Math.sin(elapsed * 5 + index) * 0.28;
         ring.scale.setScalar(pulse);
@@ -900,6 +1024,8 @@ export default function TwinScene({
       window.removeEventListener("resize", resize);
       renderer.domElement.removeEventListener("pointermove", updatePointer);
       renderer.domElement.removeEventListener("pointerdown", handlePick);
+      renderer.domElement.removeEventListener("pointerup", finishDrag);
+      renderer.domElement.removeEventListener("pointercancel", finishDrag);
       timeline.scrollTrigger?.kill();
       timeline.kill();
       presetTweensRef.current.forEach((tween) => tween.kill());
@@ -921,11 +1047,12 @@ export default function TwinScene({
       mount.replaceChildren();
       zoneGroupRef.current = null;
       routeGroupRef.current = null;
+      heatmapGroupRef.current = null;
       wallPartsRef.current = [];
       hubGroupsRef.current = [];
       zoneMaterialsRef.current = {};
     };
-  }, [plan, solution, overlay, frame, presets, onInspect, onPhaseChange, onScrollView]);
+  }, [plan, solution, overlay, frame, presets, onInspect, onPhaseChange, onScrollView, onHubMove, verified]);
 
   useEffect(() => {
     const camera = cameraRef.current;
@@ -981,6 +1108,10 @@ export default function TwinScene({
   useEffect(() => {
     if (routeGroupRef.current) routeGroupRef.current.visible = showRoutes;
   }, [showRoutes]);
+
+  useEffect(() => {
+    if (heatmapGroupRef.current) heatmapGroupRef.current.visible = showHeatmap;
+  }, [showHeatmap]);
 
   useEffect(() => {
     const slice = Math.min(1, Math.max(0.02, wallHeight));
